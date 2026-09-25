@@ -12,8 +12,10 @@ CHAT_ENDPOINT = os.environ.get(
     "FOUNDRY_CHAT_ENDPOINT", "https://opencode-lpqn3wrkin5y2.openai.azure.com/openai/v1"
 )
 # Deployment names listed on GET /models. Requests for other deployments still pass through.
+# mini/nano/luna for dictation cleanup (fast); gpt-6-sol for note formatting,
+# where a meeting summary can take a few seconds.
 CHAT_MODELS = [m.strip() for m in os.environ.get(
-    "FOUNDRY_CHAT_MODELS", "gpt-5.4-mini,gpt-5.4-nano,gpt-6-luna"
+    "FOUNDRY_CHAT_MODELS", "gpt-5.4-mini,gpt-5.4-nano,gpt-6-luna,gpt-6-sol"
 ).split(",") if m.strip()]
 
 

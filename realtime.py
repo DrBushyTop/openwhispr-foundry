@@ -6,9 +6,11 @@ turn detection. This module plays the server: an energy VAD cuts the stream at
 pauses, each finished segment goes to stt.recognize() on a worker thread, and
 the text comes back as `conversation.item.input_audio_transcription.completed`.
 
-Cutting at pauses instead of fixed intervals keeps words whole. Segments are
-at least MIN_SEGMENT_MS long unless the speaker pauses for LONG_PAUSE_MS, so
-MAI gets enough context for punctuation.
+Cutting at pauses instead of fixed intervals keeps words whole. Each stream
+gets a profile (PROFILES): a segment ends at a pause of pause_ms once it's at
+least min_segment_ms long, or at any pause of long_pause_ms. Short segments
+cost accuracy: in a real meeting, 3-5 s segments split "agendana on 5 | viime
+vuoden budjetti" at a thinking pause, and a 2 s "öö" came back as Japanese.
 
 Events sent:     session.created, session.updated,
                  input_audio_buffer.speech_started / speech_stopped / committed / cleared,
@@ -41,9 +43,18 @@ REALTIME_MODEL = os.environ.get("FOUNDRY_REALTIME_MODEL", "mai-transcribe-2")
 FRAME_MS = 20
 START_FRAMES = 3           # 60 ms of voiced frames opens a segment
 PREFIX_MS = 300            # audio kept from before speech started
-DEFAULT_PAUSE_MS = 600     # OpenWhispr sends silence_duration_ms=600
-MIN_SEGMENT_MS = 3000      # shorter segments carry on through short pauses...
-LONG_PAUSE_MS = 1500       # ...unless the pause is this long
+# OpenWhispr opens one socket per meeting source and sends a lower VAD threshold
+# for system audio (0.3, MEETING_SYSTEM_VAD_THRESHOLD in ipcHandlers.js) than
+# for the mic (0.6). That threshold is the only hint which stream is which.
+SYSTEM_THRESHOLD_BELOW = 0.45
+PROFILES = {
+    # The mic is you. Long segments give MAI context for punctuation and
+    # language detection; a thinking pause mid-sentence shouldn't end the turn.
+    "mic": {"min_segment_ms": 10000, "pause_ms": 800, "long_pause_ms": 2000},
+    # System audio is everyone else. OpenWhispr labels speakers per segment,
+    # so cut sooner to keep one segment from spanning two speakers.
+    "system": {"min_segment_ms": 5000, "pause_ms": 700, "long_pause_ms": 1500},
+}
 MAX_SEGMENT_MS = 30000     # hard cut, at the quietest frame in the last FORCE_CUT_WINDOW_MS
 FORCE_CUT_WINDOW_MS = 3000
 MIN_VOICED_MS = 200        # segments with less voiced audio are noise, not speech
@@ -68,9 +79,11 @@ class Segmenter:
     """Energy VAD over a PCM16 stream. Calls on_start(start_ms) when speech
     begins and on_segment(pcm, start_ms, end_ms) when a segment is complete."""
 
-    def __init__(self, sample_rate: int, pause_ms: int, on_start, on_segment) -> None:
+    def __init__(self, sample_rate: int, profile: dict, on_start, on_segment) -> None:
         self.sample_rate = sample_rate
-        self.pause_ms = pause_ms
+        self.pause_ms = profile["pause_ms"]
+        self.min_segment_ms = profile["min_segment_ms"]
+        self.long_pause_ms = profile["long_pause_ms"]
         self.on_start = on_start
         self.on_segment = on_segment
         self.frame_bytes = sample_rate * FRAME_MS // 1000 * 2
@@ -112,8 +125,8 @@ class Segmenter:
         self.segment.append((frame, rms, voiced))
         self.silence_ms = 0 if voiced else self.silence_ms + FRAME_MS
         segment_ms = len(self.segment) * FRAME_MS
-        if self.silence_ms >= LONG_PAUSE_MS or (
-            self.silence_ms >= self.pause_ms and segment_ms >= MIN_SEGMENT_MS
+        if self.silence_ms >= self.long_pause_ms or (
+            self.silence_ms >= self.pause_ms and segment_ms >= self.min_segment_ms
         ):
             self._finish(self.segment)
         elif segment_ms >= MAX_SEGMENT_MS:
@@ -161,7 +174,7 @@ class RealtimeSession:
         self.label = label
         self.session_id = new_id("sess")
         self.sample_rate = 24000
-        self.pause_ms = DEFAULT_PAUSE_MS
+        self.stream = "mic"  # until session.update says otherwise
         self.requested_model = REALTIME_MODEL
         self.stt_model = REALTIME_MODEL
         self.language: str | None = None
@@ -180,7 +193,7 @@ class RealtimeSession:
         self.started = time.monotonic()
 
     def _new_segmenter(self) -> Segmenter:
-        return Segmenter(self.sample_rate, self.pause_ms, self._on_speech_start, self._on_segment)
+        return Segmenter(self.sample_rate, PROFILES[self.stream], self._on_speech_start, self._on_segment)
 
     # -------------------------------------------------------------- outgoing
 
@@ -200,7 +213,8 @@ class RealtimeSession:
                 "format": {"type": "audio/pcm", "rate": self.sample_rate},
                 "transcription": {"model": self.requested_model,
                                   **({"language": self.language} if self.language else {})},
-                "turn_detection": {"type": "server_vad", "silence_duration_ms": self.pause_ms,
+                "turn_detection": {"type": "server_vad",
+                                   "silence_duration_ms": PROFILES[self.stream]["pause_ms"],
                                    "prefix_padding_ms": PREFIX_MS},
             }},
         }
@@ -315,8 +329,10 @@ class RealtimeSession:
         turn = audio_in.get("turn_detection") or session.get("turn_detection") or {}
         if fmt.get("rate"):
             self.sample_rate = int(fmt["rate"])
-        if isinstance(turn, dict) and turn.get("silence_duration_ms"):
-            self.pause_ms = int(turn["silence_duration_ms"])
+        # OpenWhispr's silence_duration_ms (600) is tuned for OpenAI's VAD and is
+        # ignored; its threshold only tells the mic and system streams apart.
+        if isinstance(turn, dict) and isinstance(turn.get("threshold"), (int, float)):
+            self.stream = "system" if turn["threshold"] < SYSTEM_THRESHOLD_BELOW else "mic"
         if transcription.get("model"):
             self.requested_model = transcription["model"]
             try:
@@ -327,6 +343,7 @@ class RealtimeSession:
         self.language = transcription.get("language") or self.language
         self.prompt = transcription.get("prompt") or self.prompt
         self.segmenter = self._new_segmenter()
+        log(f"rt {self.label}: {self.stream} stream, {PROFILES[self.stream]}")
 
     def run(self) -> None:
         worker = threading.Thread(target=self._worker, daemon=True)
@@ -353,6 +370,6 @@ class RealtimeSession:
             self.jobs.put(None)
             self.ws.close()
             audio_s = self.audio_bytes / (2 * self.sample_rate)
-            log(f"rt {self.label}: closed after {time.monotonic() - self.started:.0f}s, "
+            log(f"rt {self.label} ({self.stream}): closed after {time.monotonic() - self.started:.0f}s, "
                 f"audio={audio_s:.1f}s model={self.stt_model} (asked {self.requested_model}) "
                 f"segments={self.segments_sent}")

@@ -14,6 +14,11 @@ if (!app || !identity || !entitlements) {
 signAsync({
   app,
   identity,
+  // osx-sign looks identities up with `security find-identity -v` under the
+  // default trust policy, where a self-signed cert trusted only for code
+  // signing shows as CSSMERR_TP_NOT_TRUSTED and is skipped. codesign itself
+  // checks with the code-signing policy, which the cert passes.
+  identityValidation: false,
   platform: "darwin",
   preAutoEntitlements: false,
   optionsForFile: () => ({ hardenedRuntime: true, entitlements }),

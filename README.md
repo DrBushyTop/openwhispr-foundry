@@ -56,13 +56,21 @@ OpenWhispr's Note Recording can't use a self-hosted URL (the settings card says 
 The shim plays OpenAI's Realtime transcription server. OpenWhispr opens one WebSocket for the mic and one for system audio, and streams 24 kHz PCM16. `realtime.py` runs an energy VAD on each stream:
 
 - A segment starts after 60ms of speech, keeping 300ms of audio from before it.
-- It ends at a 600ms pause once it's at least 3s long, or at any 1.5s pause.
+- It ends at a pause, with rules per stream:
+
+  | Stream | Ends at a pause of | once it's at least | or at any pause of |
+  | --- | --- | --- | --- |
+  | mic (you) | 800ms | 10s | 2s |
+  | system (others) | 700ms | 5s | 1.5s |
+
 - At 30s it's cut at the quietest 20ms frame in its last 3s.
 - Segments with under 200ms of voiced audio are dropped as noise.
 
+The shim tells the streams apart by the detection threshold OpenWhispr sends: 0.3 for system audio (`MEETING_SYSTEM_VAD_THRESHOLD`), 0.6 for the mic. It ignores OpenWhispr's `silence_duration_ms` (600), which is tuned for OpenAI's own detection. The first real meeting used 600ms/3s rules for both streams and got 3–5s segments. A thinking pause split "agendana on 5 | viime vuoden budjetin läpikäynti", and MAI ended the first half with a full stop. A 2s segment of just "öö" came back in Japanese as "あの、" ("ano" means "um" in Japanese). The mic can take longer segments because it's only you. The system stream cuts sooner because OpenWhispr assigns one speaker label per segment, and a long segment could span two remote speakers.
+
 Each segment is encoded to MP3 in memory and sent to MAI-Transcribe-2 on a worker thread, one per stream, so results arrive in order. When recording stops, OpenWhispr sends `commit` and stops waiting at the first transcript after it. So after a commit the shim sends everything still pending as one combined transcript. OpenWhispr labels speakers locally after the meeting; the shim only returns text.
 
-Tested with OpenWhispr's own client (`openaiRealtimeStreaming.js` with the patch, run in Node) on 40s of English and Finnish with pauses. It returned six segments, each 0.2–0.3s after its pause, since MAI took 0.18–0.30s per segment. Finnish numbers came out as "kello 15.30" and "6 osallistujaa". `disconnect()` returned 2–13ms after the stop when the last phrase had already closed, and about 250ms when the stop fell mid-word. 51s of speech with no real pauses was force-cut at 28s, on a word boundary.
+With the first 600ms/3s rules, tested with OpenWhispr's own client (`openaiRealtimeStreaming.js` with the patch, run in Node) on 40s of English and Finnish with pauses. It returned six segments, each 0.2–0.3s after its pause, since MAI took 0.18–0.30s per segment. Finnish numbers came out as "kello 15.30" and "6 osallistujaa". `disconnect()` returned 2–13ms after the stop when the last phrase had already closed, and about 250ms when the stop fell mid-word. 51s of speech with no real pauses was force-cut at 28s, on a word boundary. With the mic rules, Finnish speech with 800–900ms thinking pauses stayed whole and was cut only at 2.5s topic breaks, into three 6–10s segments.
 
 OpenWhispr sends OpenAI model names (`gpt-4o-mini-transcribe`), which map to `FOUNDRY_REALTIME_MODEL` (default `mai-transcribe-2`). A realtime session gets no dictionary words or language hint from OpenWhispr, so MAI auto-detects the language.
 
@@ -72,7 +80,7 @@ The patched build is a separate app, **OpenWhispr Patched** (`/Applications/Open
 
 ```sh
 openwhispr-patch/create-signing-cert.sh   # once: local code-signing certificate, asks for your password
-openwhispr-patch/build.sh                 # uses ../openwhispr and the installed official version's tag
+openwhispr-patch/build.sh                 # ../openwhispr at its newest vX.Y.Z release tag
 openwhispr-patch/build.sh ../openwhispr v1.10.2
 ```
 
@@ -82,7 +90,27 @@ Why the signing certificate: macOS ties microphone, screen recording (system aud
 
 Settings are shared. Both apps read `~/Library/Application Support/open-whispr`, since Electron names that folder after `package.json`, not the product name. So the patched app starts with your current setup. They also share the single-instance lock: only one of them can run at a time, so they never compete for the hotkeys. The patched app may ask once for access to OpenWhispr's keychain item for stored keys; allow it. The menu bar still reads "OpenWhispr" (`main.js` forces that name).
 
-Re-run `build.sh` for each OpenWhispr release you want. Pass the tag as the second argument if the official app isn't installed.
+### Updating
+
+The patched app has no update feed, so nothing tells you about new releases. Check with `gh release list --repo OpenWhispr/openwhispr --limit 3`, or watch the repo's releases on GitHub. To update:
+
+```sh
+openwhispr-patch/build.sh     # fetches tags itself; no need to pull ../openwhispr
+# quit OpenWhispr Patched, then:
+rm -rf "/Applications/OpenWhispr Patched.app" && ditto ../openwhispr-build/dist/mac-arm64/"OpenWhispr Patched.app" "/Applications/OpenWhispr Patched.app"
+```
+
+Release tags are safer than `main`, which can be mid-change. Permissions carry over, since the bundle ID and certificate stay the same. The build stops early in two cases. If upstream changed the patched line, `git apply` fails, and `realtime-url.patch` needs updating. If upstream changed the realtime protocol, the smoke test fails and the shim needs updating. The smoke test streams a spoken sentence through the new version's client into the running shim, and it passes only if a transcript comes back.
+
+### Removing the official app
+
+The patched app doesn't need the official one. Quit it and move `/Applications/OpenWhispr.app` to the Trash. Don't use OpenWhispr's `scripts/complete-uninstall.sh`: it also deletes `~/Library/Application Support/open-whispr`, which is the settings folder the patched app uses. Its old permission entries can be cleared with `tccutil reset All com.gizmolabs.openwhispr`. Keeping it installed costs 758 MB and gives you a fallback if a patched build misbehaves.
+
+Build notes from the first run (v1.10.2, about 0.5 GB downloaded, about 10 minutes):
+
+- OpenWhispr pins Node 24 in `.nvmrc` and sets `engine-strict`, so `npm ci` fails on a newer default Node. `build.sh` then uses Homebrew's keg-only `node@24` (`brew install node@24`), leaving your default `node` alone.
+- `download-whisper-vad-model.js` can hang after printing "Downloaded", because an open socket to Hugging Face's CDN keeps Node running. If the log stops there, kill that `node scripts/download-whisper-vad-model.js` process and re-run. The rerun skips finished downloads.
+- `@electron/osx-sign` looks identities up under the default trust policy, where the self-signed certificate is reported as not trusted. `sign.js` therefore passes `identityValidation: false` and lets `codesign` check it under the code-signing policy.
 
 ### OpenWhispr settings for meetings
 
@@ -96,7 +124,7 @@ Upstream context: [issue #1280](https://github.com/OpenWhispr/openwhispr/issues/
 
 ## Language models (text cleanup)
 
-`GET /models` lists `gpt-5.4-mini`, `gpt-5.4-nano` and `gpt-6-luna`, which are deployments on `opencode-lpqn3wrkin5y2`. `POST /chat/completions` forwards any deployment name, streaming included. OpenWhispr owns the prompts. The shim changes only the parameters Azure rejects:
+`GET /models` lists `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-6-luna` and `gpt-6-sol`, which are deployments on `opencode-lpqn3wrkin5y2`. The first three are fast enough for dictation cleanup. gpt-6-sol is for note formatting. On a 40s test transcript it took 2.5s without thinking and 2.8s with it (2.2s streaming). It was also the only model that recorded a proposal as a proposal rather than a decision. `POST /chat/completions` forwards any deployment name, streaming included. OpenWhispr owns the prompts. The shim changes only the parameters Azure rejects:
 
 - It renames `max_tokens` to `max_completion_tokens`. gpt-5 and newer on Azure reject `max_tokens`.
 - OpenWhispr's "Disable thinking output" toggle sends `reasoning: {effort}`, `think`, `thinking` or `chat_template_kwargs`, which are Ollama and vLLM hints. The shim turns them into `reasoning_effort`, so the toggle still works. Without a hint, the model's default applies.

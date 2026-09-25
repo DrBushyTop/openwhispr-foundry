@@ -147,9 +147,11 @@ def silence(ms):
 
 
 class SegmenterTests(unittest.TestCase):
-    def run_segmenter(self, pcm):
+    PROFILE = {"min_segment_ms": 3000, "pause_ms": 600, "long_pause_ms": 1500}
+
+    def run_segmenter(self, pcm, profile=None):
         starts, segments = [], []
-        seg = realtime.Segmenter(RATE, 600, starts.append,
+        seg = realtime.Segmenter(RATE, profile or self.PROFILE, starts.append,
                                  lambda p, a, b: segments.append((p, a, b)))
         seg.feed(pcm)
         return seg, starts, segments
@@ -159,6 +161,14 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertEqual(len(segments), 1)
         self.assertIsNotNone(segments[0][0])
+
+    def test_mic_profile_keeps_thinking_pauses_inside_a_turn(self):
+        # "agendana on 5 ... viime vuoden budjetti": 4 s of speech, a 900 ms pause, more speech
+        mic = realtime.PROFILES["mic"]
+        _, _, segments = self.run_segmenter(tone(4000) + silence(900) + tone(3000) + silence(300), mic)
+        self.assertEqual(segments, [])
+        _, _, segments = self.run_segmenter(tone(4000) + silence(2100), mic)
+        self.assertEqual(len(segments), 1)  # a real stop still ends it
 
     def test_short_pause_inside_short_segment_does_not_cut(self):
         _, _, segments = self.run_segmenter(tone(1000) + silence(700) + tone(1000) + silence(200))
@@ -217,14 +227,22 @@ class RealtimeSessionTests(unittest.TestCase):
         session.handle({"type": "session.update", "session": {"type": "transcription", "audio": {"input": {
             "format": {"type": "audio/pcm", "rate": 24000},
             "transcription": {"model": "gpt-4o-mini-transcribe"},
-            "turn_detection": {"type": "server_vad", "silence_duration_ms": 500}}}}})
+            "turn_detection": {"type": "server_vad", "threshold": 0.6, "silence_duration_ms": 500}}}}})
         self.assertEqual(ws.types(), ["session.updated"])
         self.assertEqual(session.stt_model, realtime.REALTIME_MODEL)
-        self.assertEqual(session.pause_ms, 500)
+        self.assertEqual(session.stream, "mic")
+        self.assertEqual(session.segmenter.min_segment_ms, realtime.PROFILES["mic"]["min_segment_ms"])
+
+    def test_system_stream_detected_from_threshold(self):
+        _, session = self.make([])
+        session.handle({"type": "session.update", "session": {"audio": {"input": {
+            "turn_detection": {"type": "server_vad", "threshold": 0.3}}}}})
+        self.assertEqual(session.stream, "system")
+        self.assertEqual(session.segmenter.pause_ms, realtime.PROFILES["system"]["pause_ms"])
 
     def test_segments_then_commit_combines_remaining(self):
         ws, session = self.make(["First.", "Second."])
-        self.append(session, tone(3500) + silence(800))   # segment 1 closes on the pause
+        self.append(session, tone(3500) + silence(2100))   # segment 1 closes on a 2 s pause
         self.drain(session)                               # ...and is transcribed before the stop
         self.append(session, tone(1500))                  # segment 2 still open at stop
         session.handle({"type": "input_audio_buffer.commit"})
@@ -235,7 +253,7 @@ class RealtimeSessionTests(unittest.TestCase):
 
     def test_in_flight_segment_is_merged_into_commit_result(self):
         ws, session = self.make(["First.", "Second."])
-        self.append(session, tone(3500) + silence(800))
+        self.append(session, tone(3500) + silence(2100))
         self.append(session, tone(1500))
         session.handle({"type": "input_audio_buffer.commit"})  # before the worker ran segment 1
         self.drain(session)
@@ -252,7 +270,7 @@ class RealtimeSessionTests(unittest.TestCase):
 
     def test_failed_segment_reports_failed_event(self):
         ws, session = self.make([RuntimeError("azure down")])
-        self.append(session, tone(3500) + silence(800))
+        self.append(session, tone(3500) + silence(2100))
         self.drain(session)
         self.assertIn("conversation.item.input_audio_transcription.failed", ws.types())
 

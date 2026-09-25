@@ -4,10 +4,15 @@
 #
 #   openwhispr-patch/build.sh [openwhispr-clone] [git-ref]
 #
-# Defaults: ../openwhispr, and the tag matching the installed official app.
-# Builds in a separate git worktree (../openwhispr-build) so the clone stays
-# clean. Needs Node, npm and the Xcode command line tools. The first build
-# downloads OpenWhispr's bundled binaries and models.
+# Defaults: ../openwhispr, and its newest vX.Y.Z release tag (fetched first,
+# so there's no need to pull the clone). Builds in a separate git worktree
+# (../openwhispr-build) so the clone stays clean. Needs Node, npm, ffmpeg and
+# the Xcode command line tools. The first build downloads OpenWhispr's bundled
+# binaries and models (~0.5 GB); later builds reuse them.
+#
+# Before packaging, smoke-test.js runs the new version's realtime client
+# against the shim, so a protocol change upstream fails the build instead of
+# silently breaking meetings.
 #
 # Signs with the identity from create-signing-cert.sh if it exists, so macOS
 # permissions survive rebuilds. Without it the app is unsigned and macOS asks
@@ -20,11 +25,13 @@ SIGN_ID="OpenWhispr Patched Local Signing"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "${1:-$HERE/../../openwhispr}" && pwd)"
-INSTALLED="$(defaults read /Applications/OpenWhispr.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || true)"
-REF="${2:-v${INSTALLED:-missing}}"
 WORK="$(dirname "$SRC")/openwhispr-build"
+SHIM_URL="http://localhost:${SHIM_PORT:-9447}"
 
 git -C "$SRC" fetch --tags --quiet
+# App releases are plain vX.Y.Z tags; the repo also tags helper binaries.
+LATEST="$(git -C "$SRC" tag --list 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+REF="${2:-$LATEST}"
 git -C "$SRC" rev-parse --verify --quiet "$REF^{commit}" >/dev/null \
   || { echo "unknown ref $REF (pass one as the second argument)" >&2; exit 1; }
 
@@ -38,7 +45,32 @@ git -C "$WORK" apply "$HERE/realtime-url.patch"
 echo "Building $PRODUCT from OpenWhispr $REF in $WORK"
 
 cd "$WORK"
+# OpenWhispr pins a Node major in .nvmrc and sets engine-strict, so a newer
+# default node fails `npm ci`. Use Homebrew's node@<major> when it differs.
+WANT_NODE="$(tr -dc '0-9' < .nvmrc)"
+HAVE_NODE="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
+if [ -n "$WANT_NODE" ] && [ "$HAVE_NODE" != "$WANT_NODE" ]; then
+  KEG="$(brew --prefix 2>/dev/null)/opt/node@$WANT_NODE/bin"
+  [ -x "$KEG/node" ] || { echo "OpenWhispr needs Node $WANT_NODE: brew install node@$WANT_NODE" >&2; exit 1; }
+  PATH="$KEG:$PATH"
+  export PATH
+fi
+echo "Using node $(node --version), npm $(npm --version)"
 npm ci
+
+# Fail before the slow steps if the realtime client no longer works with the shim.
+if curl -sf -o /dev/null "$SHIM_URL/v1/models"; then
+  SMOKE="$(mktemp -d)"
+  say -o "$SMOKE/speech.aiff" "This is a smoke test of the patched OpenWhispr build."
+  ffmpeg -loglevel error -y -i "$SMOKE/speech.aiff" -ar 24000 -ac 1 -f s16le "$SMOKE/speech.pcm"
+  OPENWHISPR_OPENAI_REALTIME_URL="ws://${SHIM_URL#http://}/v1/realtime?intent=transcription" \
+    node "$HERE/smoke-test.js" "$WORK" "$SMOKE/speech.pcm" \
+    || { echo "Realtime smoke test failed: check the client changes in $REF before installing." >&2; exit 1; }
+  rm -rf "$SMOKE"
+else
+  echo "WARNING: shim not reachable at $SHIM_URL, skipping the realtime smoke test."
+fi
+
 # `npm run pack` without its fixed unsigned flags: same prepack steps (native
 # helpers, bundled binaries), then electron-builder with our name and bundle ID.
 # identity=null skips electron-builder's signing; sign.js signs below.
@@ -65,4 +97,4 @@ fi
 echo
 echo "Built: $APP"
 echo "Quit OpenWhispr (only one of the two can run at a time), then:"
-echo "  rm -rf \"/Applications/$PRODUCT.app\" && cp -R \"$APP\" /Applications/"
+echo "  rm -rf \"/Applications/$PRODUCT.app\" && ditto \"$APP\" \"/Applications/$PRODUCT.app\""
