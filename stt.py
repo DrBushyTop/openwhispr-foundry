@@ -15,6 +15,10 @@ from foundry import log, open_azure
 
 SPEECH_API_VERSION = "2025-10-15"
 
+# Defaults are my resources; set FOUNDRY_MAI_ENDPOINT and FOUNDRY_LLM_SPEECH_ENDPOINT
+# (env or config.env) to your Speech or Foundry resource URLs. They can be the same
+# resource if its region offers both MAI-Transcribe and LLM Speech.
+#
 # opencode-lpqn3wrkin5y2 (swedencentral) runs MAI-Transcribe but not LLM Speech.
 # LLM Speech needs a supported region (centralindia, eastus, northeurope,
 # southeastasia, westus, westus2), so it goes to opencode-neu-lpqn3wrkin5y2

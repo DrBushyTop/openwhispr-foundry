@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import ssl
 import subprocess
 import sys
@@ -12,7 +13,32 @@ import threading
 import time
 import urllib.parse
 
-TENANT_ID = "7135bcf1-5a12-4e82-ad41-c263afa243e8"  # huuhka.net
+
+def load_config(path: str) -> None:
+    """Read KEY=value lines from config.env into os.environ. Variables already
+    set in the environment win, so `SHIM_PORT=9448 python3 foundry_shim.py`
+    still overrides the file. The LaunchAgent passes no env vars, so this file
+    is how the auto-started shim gets settings. See config.example.env."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+# Runs on first import of this module, which every other module imports before
+# reading its own settings.
+load_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.env"))
+
+# The default is my tenant. Set FOUNDRY_TENANT_ID to yours, or to an empty value
+# to use whatever tenant `az login` picked.
+TENANT_ID = os.environ.get("FOUNDRY_TENANT_ID", "7135bcf1-5a12-4e82-ad41-c263afa243e8")
 TOKEN_RESOURCE = "https://cognitiveservices.azure.com"
 UPSTREAM_TIMEOUT_S = 120
 # Azure closed idle connections somewhere between 90s and 180s in testing, so
@@ -38,9 +64,9 @@ class AzCliToken:
         with self._lock:
             if time.time() < self._expires_at - 300:
                 return self._token
+            tenant = ["--tenant", TENANT_ID] if TENANT_ID else []
             out = subprocess.run(
-                ["az", "account", "get-access-token",
-                 "--tenant", TENANT_ID,
+                ["az", "account", "get-access-token", *tenant,
                  "--resource", TOKEN_RESOURCE,
                  "--query", "{t:accessToken,e:expires_on}", "-o", "json"],
                 check=True, capture_output=True, text=True,

@@ -7,12 +7,20 @@
 # Re-run after moving the repo. Undo with uninstall-launchagent.sh.
 set -eu
 
+# LaunchAgent labels. Any reverse-DNS name works. If you rename them, rename
+# them in uninstall-launchagent.sh too, and in the `launchctl kickstart`
+# command in the README.
 LABEL=net.huuhka.openwhispr-foundry-shim
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/openwhispr-foundry-shim.log"
 ENV_LABEL=net.huuhka.openwhispr-realtime-env
 ENV_PLIST="$HOME/Library/LaunchAgents/$ENV_LABEL.plist"
+# The shim reads its other settings from config.env itself. The port is needed
+# here too, for the meetings URL.
+if [ -z "${SHIM_PORT:-}" ] && [ -f "$REPO/config.env" ]; then
+  SHIM_PORT="$(sed -n 's/^SHIM_PORT=//p' "$REPO/config.env" | tail -1)"
+fi
 REALTIME_URL="ws://localhost:${SHIM_PORT:-9447}/v1/realtime?intent=transcription"
 PYTHON="$(command -v python3)"
 

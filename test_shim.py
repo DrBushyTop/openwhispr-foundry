@@ -132,6 +132,24 @@ class PoolTests(unittest.TestCase):
             self.assertFalse(pool.get("h")[1])
 
 
+class ConfigTests(unittest.TestCase):
+    def test_load_config(self):
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+            f.write("# comment\n\nSHIM_TEST_A=from-file\nSHIM_TEST_B = 'quoted'\n"
+                    "SHIM_TEST_C=from-file\n#SHIM_TEST_D=commented\nnot a setting\n")
+        self.addCleanup(os.remove, f.name)
+        with mock.patch.dict(os.environ, {"SHIM_TEST_C": "from-env"}):
+            foundry.load_config(f.name)
+            self.assertEqual(os.environ["SHIM_TEST_A"], "from-file")
+            self.assertEqual(os.environ["SHIM_TEST_B"], "quoted")
+            self.assertEqual(os.environ["SHIM_TEST_C"], "from-env")
+            self.assertNotIn("SHIM_TEST_D", os.environ)
+        foundry.load_config(f.name + ".missing")  # no file is fine
+
+
 # ---------------------------------------------------------------- realtime
 
 RATE = 24000

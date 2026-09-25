@@ -8,6 +8,9 @@ import os
 
 from foundry import UpstreamError, log, open_azure
 
+# Defaults are my resource and deployment names; set FOUNDRY_CHAT_ENDPOINT and
+# FOUNDRY_CHAT_MODELS (env or config.env) to yours. The endpoint is the resource's
+# OpenAI v1 URL, like https://<name>.openai.azure.com/openai/v1.
 CHAT_ENDPOINT = os.environ.get(
     "FOUNDRY_CHAT_ENDPOINT", "https://opencode-lpqn3wrkin5y2.openai.azure.com/openai/v1"
 )

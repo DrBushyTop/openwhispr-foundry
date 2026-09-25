@@ -10,7 +10,7 @@
 # in Keychain Access (login > My Certificates).
 set -eu
 
-NAME="OpenWhispr Patched Local Signing"
+NAME="OpenWhispr Patched Local Signing"  # build.sh signs with this name (SIGN_ID)
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if security find-identity -v -p codesigning | grep -q "\"$NAME\""; then

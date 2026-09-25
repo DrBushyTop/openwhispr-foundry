@@ -22,13 +22,19 @@
 # for permissions again after every rebuild.
 set -eu
 
+# The app's name and bundle ID. Any reverse-DNS ID works. macOS keys
+# permissions to the bundle ID, so changing it later means granting them again.
 APP_ID="net.huuhka.openwhispr-patched"
 PRODUCT="OpenWhispr Patched"
+# Must match NAME in create-signing-cert.sh.
 SIGN_ID="OpenWhispr Patched Local Signing"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "${1:-$HERE/../../openwhispr}" && pwd)"
 WORK="$(dirname "$SRC")/openwhispr-build"
+if [ -z "${SHIM_PORT:-}" ] && [ -f "$HERE/../config.env" ]; then
+  SHIM_PORT="$(sed -n 's/^SHIM_PORT=//p' "$HERE/../config.env" | tail -1)"
+fi
 SHIM_URL="http://localhost:${SHIM_PORT:-9447}"
 
 git -C "$SRC" fetch --tags --quiet

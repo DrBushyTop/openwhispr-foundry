@@ -17,6 +17,9 @@ path also works with a /v1 prefix.
 
 foundry.py holds the az token, connection pool and logging. websocket.py is a
 minimal RFC 6455 server. Standard library only; needs Python 3.8+, ffmpeg and az.
+
+Settings come from env vars or config.env (see config.example.env). The
+defaults point at my Azure resources.
 """
 
 from __future__ import annotations
@@ -257,7 +260,7 @@ class ShimHandler(BaseHTTPRequestHandler):
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), ShimHandler)
     server.daemon_threads = True
-    log(f"Foundry shim on http://localhost:{PORT} (tenant {TENANT_ID})")
+    log(f"Foundry shim on http://localhost:{PORT} (tenant {TENANT_ID or 'az default'})")
     log(f"  stt mai-transcribe-2 -> {stt.MAI_ENDPOINT} (style={stt.MAI_STYLE})")
     log(f"  stt llm-speech       -> {stt.LLM_SPEECH_ENDPOINT}")
     log(f"  stt default model: {stt.DEFAULT_STT_MODEL}")
@@ -267,7 +270,8 @@ def main() -> None:
         TOKEN.get()  # fail fast if az isn't logged in to the tenant
         log("  az CLI token: ok")
     except Exception as exc:
-        log(f"  az CLI token: FAILED ({exc}). Run: az login --tenant {TENANT_ID}")
+        login = f"az login --tenant {TENANT_ID}" if TENANT_ID else "az login"
+        log(f"  az CLI token: FAILED ({exc}). Run: {login}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
