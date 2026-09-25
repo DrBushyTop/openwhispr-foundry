@@ -37,7 +37,9 @@ from foundry import TENANT_ID, TOKEN, UpstreamError, log
 
 HOST = os.environ.get("SHIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIM_PORT", "9447"))  # "WHIS" on a phone keypad
-MAX_BODY_BYTES = 25 * 1024 * 1024
+# A note action with pasted screenshots sends them base64 in the chat request:
+# up to 40 images of about 1 MB each (see openwhispr-patch/note-images.patch).
+MAX_BODY_BYTES = 64 * 1024 * 1024
 
 
 # parse_multipart_form and the transcription handler follow OpenWhispr's

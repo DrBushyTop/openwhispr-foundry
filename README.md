@@ -84,7 +84,7 @@ openwhispr-patch/build.sh                 # ../openwhispr at its newest vX.Y.Z r
 openwhispr-patch/build.sh ../openwhispr v1.10.2
 ```
 
-`build.sh` builds in a separate git worktree (`../openwhispr-build`), so your clone stays clean. It applies the patch and runs OpenWhispr's own prepack steps, which compile the native helpers and download the bundled binaries. Then it runs `electron-builder --mac --dir` with the new name and bundle ID, and signs the app with `sign.js`. That uses `@electron/osx-sign` with hardened runtime and OpenWhispr's entitlements. It needs Node and the Xcode command line tools.
+`build.sh` builds in a separate git worktree (`../openwhispr-build`), so your clone stays clean. It applies `realtime-url.patch` and `note-images.patch` (see [Screenshots in notes](#screenshots-in-notes)) and runs OpenWhispr's own prepack steps, which compile the native helpers and download the bundled binaries. Then it runs `electron-builder --mac --dir` with the new name and bundle ID, and signs the app with `sign.js`. That uses `@electron/osx-sign` with hardened runtime and OpenWhispr's entitlements. It needs Node and the Xcode command line tools.
 
 Why the signing certificate: macOS ties microphone, screen recording (system audio) and accessibility grants to the app's signing certificate. The official app's grants belong to OpenWhispr's Apple team (`T832773L2J`), so no local build can reuse them. An unsigned build is identified by the hash of its own files, which changes with every rebuild, so the prompts would come back after every update. With the local certificate you grant them once. They survive rebuilds as long as the certificate stays in your keychain. `codesign` refuses a self-signed certificate that isn't trusted (tested), which is why the script trusts it for code signing and asks for your password.
 
@@ -100,7 +100,7 @@ openwhispr-patch/build.sh     # fetches tags itself; no need to pull ../openwhis
 rm -rf "/Applications/OpenWhispr Patched.app" && ditto ../openwhispr-build/dist/mac-arm64/"OpenWhispr Patched.app" "/Applications/OpenWhispr Patched.app"
 ```
 
-Release tags are safer than `main`, which can be mid-change. Permissions carry over, since the bundle ID and certificate stay the same. The build stops early in two cases. If upstream changed the patched line, `git apply` fails, and `realtime-url.patch` needs updating. If upstream changed the realtime protocol, the smoke test fails and the shim needs updating. The smoke test streams a spoken sentence through the new version's client into the running shim, and it passes only if a transcript comes back.
+Release tags are safer than `main`, which can be mid-change. Permissions carry over, since the bundle ID and certificate stay the same. The build stops early in two cases. If upstream changed code a patch touches, `git apply` fails and names the patch that needs updating. If upstream changed the realtime protocol, the smoke test fails and the shim needs updating. The smoke test streams a spoken sentence through the new version's client into the running shim, and it passes only if a transcript comes back.
 
 ### Removing the official app
 
@@ -121,6 +121,19 @@ Settings → AI Models → Speech-to-Text → Note Recording → Cloud Providers
 - OpenAI API key: any non-empty value. The shim ignores it; auth goes through your az login.
 
 Upstream context: [issue #1280](https://github.com/OpenWhispr/openwhispr/issues/1280) tracks realtime coverage. A maintainer there declined fixed-interval HTTP chunking for meetings because it clips words. That's the approach of [#2083](https://github.com/OpenWhispr/openwhispr/pull/2083) and [#1337](https://github.com/OpenWhispr/openwhispr/pull/1337). Cutting at pauses avoids most of that.
+
+## Screenshots in notes
+
+`openwhispr-patch/note-images.patch` lets you paste screenshots into a note, and note actions send them to the model. It's for meetings where a customer presents something: take a screenshot of the slide with Ctrl+Cmd+Shift+4, click in the note's Notes tab, and press Cmd+V. Dragging the screenshot thumbnail in works too. The Notes tab stays editable while recording.
+
+- **Storage.** `src/helpers/noteMedia.js` saves each image to `~/Library/Application Support/open-whispr/note-media/<paste time in ms>-<random>.png`. The note text only holds `![Screenshot 10:04](openwhispr-media://image/<name>)`, and the app serves that scheme from the folder. Embedding the image in the note text as base64 would put megabytes into the search index, the Markdown mirror, cloud sync and the "ask about this note" chat, which sends the whole note.
+- **Editor.** A TipTap image node (`src/components/ui/noteImageExtension.ts`) handles paste and drop. It accepts only `openwhispr-media://` sources, so pasting HTML from a web page never makes the app load remote images. A paste that also carries text, like cells copied from Excel, is still pasted as text.
+- **Note actions.** Each screenshot becomes `[Screenshot N, pasted HH:MM]` where it sits in your notes. If it was pasted during the recording, the same label goes into the transcript before the first segment that started after it, so the model knows what was being said. The images are sent after the text at up to 2048px, as PNG or JPEG, whichever is smaller (a 2560×1440 slide came to 98 KB). They go with a short instruction to treat them as source material with the transcript's weight. Generate Notes and Detailed Notes may place a screenshot in the output with its exact link, and the app removes any other image link the model writes. Follow-up email gets the content but no images, since the email is pasted elsewhere.
+- **Providers.** Images reach the model through Self-Hosted (how the setup above is configured) and the OpenAI-compatible providers (OpenAI, custom, OpenRouter, Groq). Anthropic, Gemini and OpenWhispr Cloud send the notes without the images and without the instruction.
+- **Cleanup.** At startup the app deletes files in `note-media` that no live note links to, once they're a day old. A deleted note's screenshots go the next time the app starts.
+- **Limits.** Up to 40 screenshots per action. The shim accepts chat requests up to 64 MB for this. Links don't render outside the app, in Markdown mirror files or `.md` exports. The official app has no image support, so editing a note there drops its screenshot links.
+
+Tested in the installed app on a meeting note with a Finnish transcript and a pasted 2560×1440 slide. Detailed Notes with gpt-6-sol took 4.5s (3,694 tokens in). It took the slide's dates and prices exactly and matched "Liisa" in the transcript to "Liisa Korhonen" on the slide. It also placed the screenshot under the section it supports. Follow-up email used the same figures and included no image.
 
 ## Language models (text cleanup)
 

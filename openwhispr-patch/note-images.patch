@@ -1,0 +1,1025 @@
+diff --git a/main.js b/main.js
+index cf28b34d..2ac39588 100644
+--- a/main.js
++++ b/main.js
+@@ -28,6 +28,10 @@ const http = require("http");
+ const tls = require("tls");
+ require("dotenv").config({ path: path.join(__dirname, ".env") });
+ 
++// Local patch: screenshots pasted into notes. The URL scheme must be registered before ready.
++const noteMedia = require("./src/helpers/noteMedia");
++noteMedia.registerScheme();
++
+ // Extend Node's TLS trust with the OS store so ws and https.get see corporate
+ // CAs that Chromium already trusts.
+ try {
+@@ -561,6 +565,7 @@ function initializeCoreManagers() {
+     oauthProtocolRegistered: protocolRegistered,
+     oauthProtocol: OAUTH_PROTOCOL,
+   });
++  noteMedia.start(databaseManager);
+ }
+ 
+ function registerSidecars() {
+diff --git a/preload.js b/preload.js
+index 1ce36bc1..e479fa89 100644
+--- a/preload.js
++++ b/preload.js
+@@ -217,6 +217,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
+   getSpaceNotes: (spaceId, limit) => ipcRenderer.invoke("db-get-space-notes", spaceId, limit),
+   updateNote: (id, updates) => ipcRenderer.invoke("db-update-note", id, updates),
+   deleteNote: (id) => ipcRenderer.invoke("db-delete-note", id),
++  // Local patch: screenshots pasted into notes (src/helpers/noteMedia.js).
++  saveNoteImage: (bytes, mimeType) => ipcRenderer.invoke("note-media-save", bytes, mimeType),
++  loadNoteImagesForModel: (names) => ipcRenderer.invoke("note-media-load-for-model", names),
+   exportNote: (noteId, format) => ipcRenderer.invoke("export-note", noteId, format),
+   exportTranscript: (noteId, format) => ipcRenderer.invoke("export-transcript", noteId, format),
+   exportDictionary: (words) => ipcRenderer.invoke("export-dictionary", words),
+diff --git a/src/components/notes/PersonalNotesView.tsx b/src/components/notes/PersonalNotesView.tsx
+index b0bf0dcb..d715e6e1 100644
+--- a/src/components/notes/PersonalNotesView.tsx
++++ b/src/components/notes/PersonalNotesView.tsx
+@@ -31,6 +31,11 @@ import {
+   collectKnownPeople,
+   type MeetingIdentity,
+ } from "../../utils/llmTranscript";
++import {
++  buildLlmTranscriptWithScreenshots,
++  collectNoteScreenshots,
++  labelScreenshotsInMarkdown,
++} from "../../utils/noteScreenshots";
+ import type { MentionPerson } from "../../utils/mentionMarkdown";
+ import type { CalendarAttendee } from "../../types/calendar";
+ import {
+@@ -656,6 +661,8 @@ export default function PersonalNotesView({
+     const noteContent = editorNote.content;
+     const hasNotes = !!noteContent.trim();
+     if (!hasNotes && !rawTranscript) return;
++    // Local patch: pasted screenshots go to the model as images (utils/noteScreenshots.ts).
++    const screenshots = collectNoteScreenshots(noteContent);
+ 
+     let formattedTranscript = "";
+     let meetingContext = "";
+@@ -677,7 +684,16 @@ export default function PersonalNotesView({
+         };
+         const selfLabel = identity.selfName || t("notes.speaker.you");
+         meetingContext = buildMeetingContext(identity, selfLabel);
+-        formattedTranscript = buildLlmTranscript(segments, speakerMappings, selfLabel, t);
++        formattedTranscript =
++          screenshots.length > 0
++            ? buildLlmTranscriptWithScreenshots(
++                segments,
++                speakerMappings,
++                selfLabel,
++                t,
++                screenshots
++              )
++            : buildLlmTranscript(segments, speakerMappings, selfLabel, t);
+         knownPeople = collectKnownPeople(identity, speakerMappings, segments);
+       }
+       if (!formattedTranscript) {
+@@ -686,7 +702,7 @@ export default function PersonalNotesView({
+     }
+ 
+     const parts = [
+-      hasNotes ? noteContent : "",
++      hasNotes ? labelScreenshotsInMarkdown(noteContent, screenshots) : "",
+       meetingContext,
+       formattedTranscript ? `## Meeting Transcript\n${formattedTranscript}` : "",
+     ]
+@@ -697,6 +713,7 @@ export default function PersonalNotesView({
+       modelId: effectiveModelId,
+       isMeetingNote,
+       knownPeople,
++      screenshots,
+       allowTitleGeneration: isRegenerableNoteTitle(
+         editorNote.title,
+         [t("notes.list.untitledNote"), t("notes.list.newNote"), t("notes.sidebar.newNote")],
+diff --git a/src/components/ui/RichTextEditor.tsx b/src/components/ui/RichTextEditor.tsx
+index 57785dce..91fe7281 100644
+--- a/src/components/ui/RichTextEditor.tsx
++++ b/src/components/ui/RichTextEditor.tsx
+@@ -7,6 +7,7 @@ import Placeholder from "@tiptap/extension-placeholder";
+ import { Markdown } from "tiptap-markdown";
+ import { cn } from "../lib/utils";
+ import { createMentionExtension } from "./RichTextEditorMention";
++import { NoteImage } from "./noteImageExtension";
+ import type { MentionPerson } from "../../utils/mentionMarkdown";
+ 
+ interface RichTextEditorProps {
+@@ -50,6 +51,7 @@ export function RichTextEditor({
+       }),
+       TaskList,
+       TaskItem.configure({ nested: true }),
++      NoteImage,
+       Placeholder.configure({
+         placeholder: placeholder || "",
+         emptyEditorClass: "is-editor-empty",
+diff --git a/src/components/ui/noteImageExtension.ts b/src/components/ui/noteImageExtension.ts
+new file mode 100644
+index 00000000..330c3349
+--- /dev/null
++++ b/src/components/ui/noteImageExtension.ts
+@@ -0,0 +1,103 @@
++// Local patch: screenshots in the note editor. Pasting or dropping an image saves
++// it through the main process (noteMedia.js) and inserts ![Screenshot HH:MM](openwhispr-media://…).
++// tiptap-markdown serializes any node named "image" as Markdown image syntax.
++import { Node, mergeAttributes } from "@tiptap/core";
++import { Plugin, PluginKey } from "@tiptap/pm/state";
++import type { EditorView } from "@tiptap/pm/view";
++import { noteMediaNameFromUrl, noteMediaPastedAt } from "../../helpers/noteMediaLinks";
++import { formatClock } from "../../utils/noteScreenshots";
++
++const imageFiles = (list: FileList | null | undefined) =>
++  Array.from(list ?? []).filter((file) => file.type.startsWith("image/"));
++
++async function insertImages(view: EditorView, files: File[], at: number | null) {
++  let pos = at;
++  for (const file of files) {
++    const bytes = new Uint8Array(await file.arrayBuffer());
++    const saved = await window.electronAPI?.saveNoteImage?.(bytes, file.type);
++    if (!saved?.success || !saved.url || !saved.name) {
++      console.warn("Pasted image was not saved", saved?.error);
++      continue;
++    }
++    if (view.isDestroyed) return;
++    const pastedAt = noteMediaPastedAt(saved.name) ?? Date.now();
++    const node = view.state.schema.nodes.image.create({
++      src: saved.url,
++      alt: `Screenshot ${formatClock(pastedAt)}`,
++    });
++    const tr =
++      pos == null
++        ? view.state.tr.replaceSelectionWith(node)
++        : view.state.tr.replaceRangeWith(
++            Math.min(pos, view.state.doc.content.size),
++            Math.min(pos, view.state.doc.content.size),
++            node
++          );
++    view.dispatch(tr.scrollIntoView());
++    if (pos != null) pos = tr.mapping.map(pos);
++  }
++}
++
++export const NoteImage = Node.create({
++  name: "image",
++  // Before Link's paste handler, so an image paste never reaches it.
++  priority: 1000,
++  inline: true,
++  group: "inline",
++  atom: true,
++  draggable: true,
++
++  addAttributes() {
++    return {
++      src: { default: null },
++      alt: { default: null },
++      title: { default: null },
++    };
++  },
++
++  // Only our own screenshots: an <img> pasted from a web page must not make the
++  // app fetch remote images.
++  parseHTML() {
++    return [
++      {
++        tag: "img[src]",
++        getAttrs: (element) =>
++          noteMediaNameFromUrl((element as HTMLElement).getAttribute("src")) ? null : false,
++      },
++    ];
++  },
++
++  renderHTML({ HTMLAttributes }) {
++    return ["img", mergeAttributes(HTMLAttributes, { class: "note-image" })];
++  },
++
++  addProseMirrorPlugins() {
++    return [
++      new Plugin({
++        key: new PluginKey("noteImagePaste"),
++        props: {
++          handlePaste(view, event) {
++            const data = event.clipboardData;
++            const files = imageFiles(data?.files);
++            // Spreadsheets and some editors put a picture of the copied cells next
++            // to the text; that paste is text.
++            if (!view.editable || files.length === 0 || data?.getData("text/plain").trim()) {
++              return false;
++            }
++            event.preventDefault();
++            void insertImages(view, files, null);
++            return true;
++          },
++          handleDrop(view, event, _slice, moved) {
++            const files = imageFiles(event.dataTransfer?.files);
++            if (!view.editable || moved || files.length === 0) return false;
++            event.preventDefault();
++            const at = view.posAtCoords({ left: event.clientX, top: event.clientY });
++            void insertImages(view, files, at?.pos ?? null);
++            return true;
++          },
++        },
++      }),
++    ];
++  },
++});
+diff --git a/src/helpers/noteMedia.js b/src/helpers/noteMedia.js
+new file mode 100644
+index 00000000..c7474ee4
+--- /dev/null
++++ b/src/helpers/noteMedia.js
+@@ -0,0 +1,178 @@
++// Screenshots pasted into notes. The files live in <userData>/note-media and
++// notes link to them as openwhispr-media://image/<name> (see noteMediaLinks.js),
++// so note text, search, sync and the Markdown mirror only carry a short link.
++const fs = require("fs");
++const path = require("path");
++const crypto = require("crypto");
++const { app, ipcMain, nativeImage, protocol } = require("electron");
++const {
++  NOTE_MEDIA_SCHEME,
++  NOTE_MEDIA_NAME_RE,
++  findNoteMediaNames,
++  noteMediaPastedAt,
++  noteMediaUrl,
++} = require("./noteMediaLinks");
++
++const MAX_SAVE_BYTES = 25 * 1024 * 1024;
++// Images sent to a note action: long edge capped at 2048px, each kept under
++// ~1 MB so a note with dozens of screenshots still fits one request.
++const MODEL_MAX_EDGE_PX = 2048;
++const MODEL_FALLBACK_EDGE_PX = 1568;
++const MODEL_MAX_BYTES = 1024 * 1024;
++const MODEL_MAX_IMAGES = 40;
++// Files no live note links to are deleted at startup, once they're this old:
++// a just-pasted image may not have been autosaved into its note yet.
++const ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
++
++const log = () => require("./debugLogger");
++
++function mediaDir() {
++  return path.join(app.getPath("userData"), "note-media");
++}
++
++function mediaPath(name) {
++  return typeof name === "string" && NOTE_MEDIA_NAME_RE.test(name)
++    ? path.join(mediaDir(), name)
++    : null;
++}
++
++const mimeFor = (name) => (name.endsWith(".jpg") ? "image/jpeg" : "image/png");
++
++// Must run before the app's ready event. `standard` makes the URL parse with a
++// host (image) and path (the file name); `secure` lets pages load it like https.
++function registerScheme() {
++  protocol.registerSchemesAsPrivileged([
++    {
++      scheme: NOTE_MEDIA_SCHEME,
++      privileges: { standard: true, secure: true, supportFetchAPI: true },
++    },
++  ]);
++}
++
++async function serve(request) {
++  let name = null;
++  try {
++    const url = new URL(request.url);
++    if (url.hostname === "image") name = decodeURIComponent(url.pathname.slice(1));
++  } catch {
++    // fall through to 404
++  }
++  const file = mediaPath(name);
++  if (!file) return new Response("Not found", { status: 404 });
++  try {
++    const data = await fs.promises.readFile(file);
++    return new Response(data, {
++      headers: { "Content-Type": mimeFor(name), "Cache-Control": "private, max-age=31536000" },
++    });
++  } catch {
++    return new Response("Not found", { status: 404 });
++  }
++}
++
++async function save(bytes, mimeType) {
++  const buffer = Buffer.from(bytes || []);
++  if (buffer.length === 0 || buffer.length > MAX_SAVE_BYTES) {
++    throw new Error("Image is empty or larger than 25 MB");
++  }
++  const image = nativeImage.createFromBuffer(buffer);
++  if (image.isEmpty()) throw new Error(`Unsupported image (${mimeType || "unknown type"})`);
++  // PNG and JPEG are stored as pasted; anything else nativeImage can decode becomes PNG.
++  const isJpeg = mimeType === "image/jpeg";
++  const data = isJpeg || mimeType === "image/png" ? buffer : image.toPNG();
++  const name = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}.${isJpeg ? "jpg" : "png"}`;
++  await fs.promises.mkdir(mediaDir(), { recursive: true });
++  await fs.promises.writeFile(path.join(mediaDir(), name), data);
++  return { name, url: noteMediaUrl(name) };
++}
++
++function fitWithin(image, maxEdge) {
++  const { width, height } = image.getSize();
++  const scale = Math.min(1, maxEdge / Math.max(width, height));
++  return scale < 1
++    ? image.resize({
++        width: Math.round(width * scale),
++        height: Math.round(height * scale),
++        quality: "best",
++      })
++    : image;
++}
++
++// Slides and documents are usually smaller as PNG and stay sharper; photos and
++// video frames are smaller as JPEG. Send whichever is smaller.
++function encodeSmallest(image) {
++  const png = image.toPNG();
++  const jpeg = image.toJPEG(88);
++  return png.length <= jpeg.length
++    ? { mediaType: "image/png", bytes: png }
++    : { mediaType: "image/jpeg", bytes: jpeg };
++}
++
++function loadForModel(name) {
++  const file = mediaPath(name);
++  if (!file || !fs.existsSync(file)) return null;
++  const source = nativeImage.createFromPath(file);
++  if (source.isEmpty()) return null;
++  let encoded = encodeSmallest(fitWithin(source, MODEL_MAX_EDGE_PX));
++  if (encoded.bytes.length > MODEL_MAX_BYTES) {
++    encoded = encodeSmallest(fitWithin(source, MODEL_FALLBACK_EDGE_PX));
++  }
++  return { name, mediaType: encoded.mediaType, data: encoded.bytes.toString("base64") };
++}
++
++function sweepOrphans(databaseManager) {
++  const dir = mediaDir();
++  if (!databaseManager?.db || !fs.existsSync(dir)) return;
++  const referenced = new Set();
++  const rows = databaseManager.db
++    .prepare("SELECT content, enhanced_content FROM notes WHERE deleted_at IS NULL")
++    .all();
++  for (const row of rows) {
++    for (const name of findNoteMediaNames(`${row.content || ""}\n${row.enhanced_content || ""}`)) {
++      referenced.add(name);
++    }
++  }
++  const cutoff = Date.now() - ORPHAN_MIN_AGE_MS;
++  let removed = 0;
++  for (const name of fs.readdirSync(dir)) {
++    if (!NOTE_MEDIA_NAME_RE.test(name) || referenced.has(name)) continue;
++    if ((noteMediaPastedAt(name) ?? Infinity) > cutoff) continue;
++    fs.rmSync(path.join(dir, name), { force: true });
++    removed++;
++  }
++  if (removed > 0) log().info("Removed unlinked note screenshots", { removed }, "noteMedia");
++}
++
++// After app ready: serve the files, register IPC, and clean up in the background.
++function start(databaseManager) {
++  protocol.handle(NOTE_MEDIA_SCHEME, serve);
++
++  ipcMain.handle("note-media-save", async (_event, bytes, mimeType) => {
++    try {
++      return { success: true, ...(await save(bytes, mimeType)) };
++    } catch (error) {
++      log().warn("Saving pasted image failed", { error: error.message }, "noteMedia");
++      return { success: false, error: error.message };
++    }
++  });
++
++  ipcMain.handle("note-media-load-for-model", async (_event, names) =>
++    (Array.isArray(names) ? names.slice(0, MODEL_MAX_IMAGES) : []).map((name) => {
++      try {
++        return loadForModel(name);
++      } catch (error) {
++        log().warn("Loading note screenshot failed", { name, error: error.message }, "noteMedia");
++        return null;
++      }
++    })
++  );
++
++  setTimeout(() => {
++    try {
++      sweepOrphans(databaseManager);
++    } catch (error) {
++      log().warn("Note screenshot cleanup failed", { error: error.message }, "noteMedia");
++    }
++  }, 60_000).unref();
++}
++
++module.exports = { registerScheme, start, MODEL_MAX_IMAGES };
+diff --git a/src/helpers/noteMediaLinks.js b/src/helpers/noteMediaLinks.js
+new file mode 100644
+index 00000000..ecc1d2ee
+--- /dev/null
++++ b/src/helpers/noteMediaLinks.js
+@@ -0,0 +1,35 @@
++// Links to screenshots pasted into notes: ![Screenshot 10:04](openwhispr-media://image/<name>).
++// Shared by the main process, which stores and serves the files (noteMedia.js),
++// and the renderer, which inserts them and sends them to note actions.
++
++export const NOTE_MEDIA_SCHEME = "openwhispr-media";
++export const NOTE_MEDIA_URL_PREFIX = `${NOTE_MEDIA_SCHEME}://image/`;
++
++// <paste time in epoch ms>-<8 hex chars>.<png|jpg>. The name carries the paste
++// time so no separate metadata has to be stored or synced.
++export const NOTE_MEDIA_NAME_RE = /^(\d{13})-[0-9a-f]{8}\.(?:png|jpg)$/;
++const NOTE_MEDIA_URL_RE = /openwhispr-media:\/\/image\/(\d{13}-[0-9a-f]{8}\.(?:png|jpg))/g;
++
++export function noteMediaUrl(name) {
++  return NOTE_MEDIA_URL_PREFIX + name;
++}
++
++export function noteMediaNameFromUrl(url) {
++  if (typeof url !== "string" || !url.startsWith(NOTE_MEDIA_URL_PREFIX)) return null;
++  const name = url.slice(NOTE_MEDIA_URL_PREFIX.length);
++  return NOTE_MEDIA_NAME_RE.test(name) ? name : null;
++}
++
++export function noteMediaPastedAt(name) {
++  const match = NOTE_MEDIA_NAME_RE.exec(name || "");
++  return match ? Number(match[1]) : null;
++}
++
++/** File names of every screenshot linked in the text, first occurrence order, no duplicates. */
++export function findNoteMediaNames(text) {
++  const names = [];
++  for (const match of String(text || "").matchAll(NOTE_MEDIA_URL_RE)) {
++    if (!names.includes(match[1])) names.push(match[1]);
++  }
++  return names;
++}
+diff --git a/src/index.css b/src/index.css
+index 52a94aa5..49721ddb 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -1768,6 +1768,22 @@ a:hover {
+   background: oklch(0.62 0.22 260 / 0.15);
+ }
+ 
++/* Local patch: screenshots pasted into notes */
++.rich-text-editor-content img.note-image {
++  display: block;
++  max-width: 100%;
++  max-height: 32rem;
++  height: auto;
++  margin: 0.5rem 0;
++  border: 1px solid var(--color-border);
++  border-radius: 6px;
++}
++
++.rich-text-editor-content img.note-image.ProseMirror-selectednode {
++  outline: 2px solid var(--color-ring);
++  outline-offset: 2px;
++}
++
+ /* Task list (checkboxes) */
+ .rich-text-editor-content ul[data-type="taskList"] {
+   list-style: none;
+diff --git a/src/services/BaseReasoningService.ts b/src/services/BaseReasoningService.ts
+index c06e224b..80a35832 100644
+--- a/src/services/BaseReasoningService.ts
++++ b/src/services/BaseReasoningService.ts
+@@ -5,6 +5,13 @@ import { getDictionaryHintWords } from "../utils/snippets";
+ import type { InferenceScope } from "../config/inferenceScopes";
+ import type { ScreenContextImage } from "../types/electron";
+ 
++/** Local patch: screenshots from a note, sent with a note action (see utils/noteScreenshots.ts). */
++export interface NoteImageAttachments {
++  /** Sent as text after the user message, before the images. */
++  instructions: string;
++  images: Array<{ label: string; mediaType: string; data: string }>;
++}
++
+ export interface ReasoningConfig {
+   maxTokens?: number;
+   temperature?: number;
+@@ -19,6 +26,7 @@ export interface ReasoningConfig {
+   screenContext?: ScreenContextImage;
+   /** Suffix-free prompt used when a screenshot-carrying request is retried text-only. */
+   textOnlySystemPrompt?: string;
++  noteImages?: NoteImageAttachments;
+   language?: string;
+   requireCompleteOutput?: boolean;
+   requiresAgent?: boolean;
+diff --git a/src/services/ReasoningService.ts b/src/services/ReasoningService.ts
+index 5746733f..3e8c09b2 100644
+--- a/src/services/ReasoningService.ts
++++ b/src/services/ReasoningService.ts
+@@ -38,6 +38,7 @@ import {
+ } from "./ai/chatRequestBody";
+ import { getModelFamilyConstraints } from "./ai/modelFamilyConstraints";
+ import { detectEndpointDialect } from "./ai/thinkingSuppressionDialects";
++import { noteImageUserContent } from "./ai/noteImageContent";
+ import { openCodeSessionHeaders } from "./ai/openCodeSession";
+ import { createStreamingThinkFilter } from "./ai/streamingThinkFilter";
+ import { extractApiErrorMessage } from "./ai/apiErrorMessage";
+@@ -296,7 +297,7 @@ class ReasoningService extends BaseReasoningService {
+ 
+     const messages = [
+       { role: "system", content: systemPrompt },
+-      { role: "user", content: userPrompt },
++      { role: "user", content: noteImageUserContent(userPrompt, config) ?? userPrompt },
+     ];
+ 
+     const requestBody: any = { model, messages };
+diff --git a/src/services/ai/inferenceProviders/openai.ts b/src/services/ai/inferenceProviders/openai.ts
+index d00b407b..557573ce 100644
+--- a/src/services/ai/inferenceProviders/openai.ts
++++ b/src/services/ai/inferenceProviders/openai.ts
+@@ -20,6 +20,7 @@ import {
+ import { extractApiErrorMessage } from "../apiErrorMessage";
+ import { wrapCleanupTranscript } from "../../../config/prompts";
+ import { openCodeSessionHeaders } from "../openCodeSession";
++import { noteImageUserContent } from "../noteImageContent";
+ 
+ const OPENAI_ENDPOINT_PREF_STORAGE_KEY = "openAiEndpointPreference";
+ const PROBE_TIMEOUT_MS = 2_000;
+@@ -168,8 +169,15 @@ export const openaiProvider: InferenceProvider = {
+       ? `data:${config.screenContext.mediaType};base64,${config.screenContext.data}`
+       : null;
+     // The Responses and Chat Completions APIs name image content parts differently.
+-    const buildMessages = (type: "responses" | "chat") =>
+-      imageDataUrl
++    const buildMessages = (type: "responses" | "chat") => {
++      const withNoteImages = noteImageUserContent(userContent, config, type);
++      if (withNoteImages) {
++        return [
++          { role: "system", content: systemPrompt },
++          { role: "user", content: withNoteImages },
++        ];
++      }
++      return imageDataUrl
+         ? [
+             { role: "system", content: systemPrompt },
+             {
+@@ -188,6 +196,7 @@ export const openaiProvider: InferenceProvider = {
+             { role: "system", content: systemPrompt },
+             { role: "user", content: userContent },
+           ];
++    };
+ 
+     const openAiBase = isOpenRouter
+       ? API_ENDPOINTS.OPENROUTER_BASE
+diff --git a/src/services/ai/noteImageContent.ts b/src/services/ai/noteImageContent.ts
+new file mode 100644
+index 00000000..526ecd64
+--- /dev/null
++++ b/src/services/ai/noteImageContent.ts
+@@ -0,0 +1,30 @@
++import type { ReasoningConfig } from "../BaseReasoningService";
++
++/**
++ * Local patch: the user message as content parts when a note action carries
++ * screenshots (config.noteImages), or null when it carries none. Order: the note
++ * text, the screenshot instructions, then each screenshot preceded by its label.
++ */
++export function noteImageUserContent(
++  text: string,
++  config: ReasoningConfig,
++  dialect: "chat" | "responses" = "chat"
++): Array<Record<string, unknown>> | null {
++  const attachments = config.noteImages;
++  if (!attachments?.images?.length) return null;
++
++  const textPart = (value: string) =>
++    dialect === "responses" ? { type: "input_text", text: value } : { type: "text", text: value };
++  const imagePart = (image: { mediaType: string; data: string }) => {
++    const url = `data:${image.mediaType};base64,${image.data}`;
++    return dialect === "responses"
++      ? { type: "input_image", image_url: url, detail: "high" }
++      : { type: "image_url", image_url: { url, detail: "high" } };
++  };
++
++  return [
++    textPart(text),
++    textPart(attachments.instructions),
++    ...attachments.images.flatMap((image) => [textPart(`${image.label}:`), imagePart(image)]),
++  ];
++}
+diff --git a/src/stores/actionProcessingStore.ts b/src/stores/actionProcessingStore.ts
+index 5db8ada8..66903ab2 100644
+--- a/src/stores/actionProcessingStore.ts
++++ b/src/stores/actionProcessingStore.ts
+@@ -1,6 +1,7 @@
+ import { create } from "zustand";
+ import {
+   BASE_SYSTEM_PROMPT,
++  FOLLOW_UP_EMAIL_KEY,
+   MEETING_INPUT_PREAMBLE,
+   MEETING_SYSTEM_PROMPT,
+   NOTE_INPUT_PREAMBLE,
+@@ -14,6 +15,11 @@ import { generateNoteTitle } from "../utils/generateTitle";
+ import { buildNoteFormattingOverrides } from "../helpers/noteFormattingOverrides";
+ import { tagActionItemOwners, type MentionPerson } from "../utils/mentionMarkdown";
+ import type { ActionItem } from "../types/electron";
++import {
++  loadScreenshotAttachments,
++  sanitizeScreenshotLinks,
++  type NoteScreenshot,
++} from "../utils/noteScreenshots";
+ 
+ export type ActionProcessingStatus = "idle" | "processing" | "success";
+ 
+@@ -74,6 +80,8 @@ export interface RunActionOptions {
+   allowTitleGeneration?: boolean;
+   /** People whose names in generated action-item owners become mention tags. */
+   knownPeople?: MentionPerson[];
++  /** Local patch: screenshots linked in the note, sent to the model as images. */
++  screenshots?: NoteScreenshot[];
+ }
+ 
+ export interface RunActionLabels {
+@@ -131,12 +139,19 @@ export function runBackgroundAction(
+         options.isMeetingNote ? settings.customDictionary : undefined,
+         settings.uiLanguage
+       );
+-      const enhanced = await reasoningService.processText(noteContent, modelId, null, {
++      // Notes may show the screenshots inline; an email gets pasted elsewhere, so it can't.
++      const inlineScreenshots = action.translation_key !== FOLLOW_UP_EMAIL_KEY;
++      const screenshots = await loadScreenshotAttachments(
++        options.screenshots ?? [],
++        inlineScreenshots
++      );
++      let enhanced = await reasoningService.processText(noteContent, modelId, null, {
+         systemPrompt,
+         maxTokens: NOTE_OUTPUT_MAX_TOKENS,
+         temperature: 0.3,
+         disableThinking: settings.noteFormattingDisableThinking,
+         ...providerOverrides,
++        ...(screenshots ? { noteImages: screenshots.attachments } : {}),
+       });
+ 
+       // IPC-bridged providers relay whatever the model returned; a blank
+@@ -144,6 +159,9 @@ export function runBackgroundAction(
+       if (!enhanced.trim()) {
+         throw new Error("Model returned no text");
+       }
++      if (screenshots) {
++        enhanced = sanitizeScreenshotLinks(enhanced, screenshots.attached, inlineScreenshots);
++      }
+ 
+       if (cancelledFlags.get(noteId)) return;
+ 
+diff --git a/src/types/electron.ts b/src/types/electron.ts
+index 2118475b..edaf0384 100644
+--- a/src/types/electron.ts
++++ b/src/types/electron.ts
+@@ -1436,6 +1436,13 @@ declare global {
+         }
+       ) => Promise<{ success: boolean; note?: NoteItem }>;
+       deleteNote: (id: number) => Promise<{ success: boolean }>;
++      saveNoteImage?: (
++        bytes: Uint8Array,
++        mimeType: string
++      ) => Promise<{ success: boolean; name?: string; url?: string; error?: string }>;
++      loadNoteImagesForModel?: (
++        names: string[]
++      ) => Promise<Array<{ name: string; mediaType: string; data: string } | null>>;
+       exportNote: (
+         noteId: number,
+         format: "txt" | "md"
+diff --git a/src/utils/noteScreenshots.ts b/src/utils/noteScreenshots.ts
+new file mode 100644
+index 00000000..6ce5423a
+--- /dev/null
++++ b/src/utils/noteScreenshots.ts
+@@ -0,0 +1,182 @@
++// Local patch: screenshots pasted into a note, sent to note actions as images.
++//
++// In the text the model reads, each screenshot link becomes "[Screenshot N, pasted HH:MM]",
++// both where it sits in the user's notes and at the matching point of the meeting
++// transcript. The images themselves travel as ReasoningConfig.noteImages, together with
++// the instructions below, so a provider that can't send images never sees either.
++import {
++  findNoteMediaNames,
++  noteMediaNameFromUrl,
++  noteMediaPastedAt,
++  noteMediaUrl,
++} from "../helpers/noteMediaLinks";
++import type { NoteImageAttachments } from "../services/BaseReasoningService";
++import type { TranscriptSegment } from "../stores/meetingRecordingStore";
++import { resolveLlmSpeakerLabel } from "./llmTranscript";
++
++type Translate = (key: string, options?: Record<string, unknown>) => string;
++
++export interface NoteScreenshot {
++  name: string;
++  url: string;
++  /** "Screenshot 2" */
++  title: string;
++  /** "Screenshot 2, pasted 10:04" */
++  label: string;
++  pastedAt: number | null;
++}
++
++// A screenshot pasted this long before the first or after the last transcript
++// segment still belongs to the meeting (e.g. the title slide before anyone spoke).
++const MEETING_MARGIN_MS = 2 * 60 * 1000;
++
++// ![alt](url "title"); alt and title may contain backslash escapes.
++const MARKDOWN_IMAGE_RE = /!\[(?:\\.|[^\]\\])*\]\(\s*<?([^)\s>]*)>?(?:\s+"(?:\\.|[^"\\])*")?\s*\)/g;
++
++export function formatClock(ms: number): string {
++  const date = new Date(ms);
++  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
++}
++
++export function collectNoteScreenshots(markdown: string): NoteScreenshot[] {
++  return findNoteMediaNames(markdown).map((name, index) => {
++    const pastedAt = noteMediaPastedAt(name);
++    const title = `Screenshot ${index + 1}`;
++    return {
++      name,
++      url: noteMediaUrl(name),
++      title,
++      label: pastedAt ? `${title}, pasted ${formatClock(pastedAt)}` : title,
++      pastedAt,
++    };
++  });
++}
++
++/** Replaces each screenshot's Markdown image with its label. */
++export function labelScreenshotsInMarkdown(markdown: string, shots: NoteScreenshot[]): string {
++  const byName = new Map(shots.map((shot) => [shot.name, shot]));
++  return markdown.replace(MARKDOWN_IMAGE_RE, (match, url: string) => {
++    const shot = byName.get(noteMediaNameFromUrl(url) ?? "");
++    return shot ? `[${shot.label}]` : match;
++  });
++}
++
++/**
++ * buildLlmTranscript with a "[Screenshot N, pasted HH:MM]" line before the first
++ * segment that started after the paste. Segment timestamps and paste times are both
++ * wall-clock ms. Screenshots pasted outside the meeting only appear in the notes.
++ */
++export function buildLlmTranscriptWithScreenshots(
++  segments: TranscriptSegment[],
++  speakerMappings: Record<string, string>,
++  selfLabel: string,
++  t: Translate,
++  shots: NoteScreenshot[]
++): string {
++  const lines = segments.map(
++    (segment) =>
++      `${resolveLlmSpeakerLabel(segment, speakerMappings, selfLabel, t)}: ${segment.text}`
++  );
++  const times = segments
++    .map((segment) => segment.timestamp)
++    .filter((time): time is number => Number.isFinite(time));
++  if (times.length === 0) return lines.join("\n");
++
++  const first = times.reduce((a, b) => Math.min(a, b));
++  const last = times.reduce((a, b) => Math.max(a, b));
++  const pending = shots
++    .filter(
++      (shot) =>
++        shot.pastedAt != null &&
++        shot.pastedAt >= first - MEETING_MARGIN_MS &&
++        shot.pastedAt <= last + MEETING_MARGIN_MS
++    )
++    .sort((a, b) => a.pastedAt! - b.pastedAt!);
++
++  const out: string[] = [];
++  let next = 0;
++  segments.forEach((segment, index) => {
++    const time = segment.timestamp;
++    while (next < pending.length && Number.isFinite(time) && pending[next].pastedAt! < time!) {
++      out.push(`[${pending[next++].label}]`);
++    }
++    out.push(lines[index]);
++  });
++  while (next < pending.length) out.push(`[${pending[next++].label}]`);
++  return out.join("\n");
++}
++
++export function buildScreenshotInstructions(shots: NoteScreenshot[], inline: boolean): string {
++  const count = shots.length === 1 ? "1 screenshot" : `${shots.length} screenshots`;
++  const lines = [
++    "## Screenshots",
++    `The user pasted ${count} into these notes, typically of slides, documents or dashboards someone presented. They are attached below as images, each introduced by its label. "[Screenshot N, pasted HH:MM]" in the notes or the transcript marks where each one was pasted, which is close to when it was on screen.`,
++    "",
++    "Treat what the screenshots show as source material with the same weight as the transcript. Keep their exact names, figures, dates and wording, and connect them to what was being said at the time.",
++    "",
++  ];
++  if (inline) {
++    lines.push(
++      "Where a screenshot directly supports a section of your output, put it on its own line after that section's text, copying its Markdown image exactly from this list:",
++      ...shots.map((shot) => `- ![${shot.title}](${shot.url})`),
++      "Use each screenshot at most once, and only where it helps the reader. Don't write any other image links."
++    );
++  } else {
++    lines.push(
++      "Don't put images or image links in your output. Where a screenshot matters, state what it shows in words."
++    );
++  }
++  return lines.join("\n");
++}
++
++/**
++ * Keeps only image links to the attached screenshots, each at most once, and only
++ * when the action may place them. Anything else the model wrote as an image goes.
++ */
++export function sanitizeScreenshotLinks(
++  output: string,
++  shots: NoteScreenshot[],
++  inline: boolean
++): string {
++  const allowed = new Set(inline ? shots.map((shot) => shot.name) : []);
++  const used = new Set<string>();
++  let removed = false;
++  const kept = output.replace(MARKDOWN_IMAGE_RE, (match, url: string) => {
++    const name = noteMediaNameFromUrl(url);
++    if (name && allowed.has(name) && !used.has(name)) {
++      used.add(name);
++      return match;
++    }
++    removed = true;
++    return "";
++  });
++  return removed ? kept.replace(/\n{3,}/g, "\n\n").trim() : kept;
++}
++
++/** Loads the screenshots from disk, downscaled for the model. Null if none could be read. */
++export async function loadScreenshotAttachments(
++  shots: NoteScreenshot[],
++  inline: boolean
++): Promise<{ attached: NoteScreenshot[]; attachments: NoteImageAttachments } | null> {
++  if (shots.length === 0) return null;
++  const loaded =
++    (await window.electronAPI
++      ?.loadNoteImagesForModel?.(shots.map((shot) => shot.name))
++      .catch(() => null)) ?? [];
++  const pairs = shots
++    .map((shot, index) => ({ shot, image: loaded[index] }))
++    .filter((pair) => !!pair.image);
++  if (pairs.length === 0) return null;
++  const attached = pairs.map((pair) => pair.shot);
++  return {
++    attached,
++    attachments: {
++      instructions: buildScreenshotInstructions(attached, inline),
++      images: pairs.map(({ shot, image }) => ({
++        label: shot.label,
++        mediaType: image!.mediaType,
++        data: image!.data,
++      })),
++    },
++  };
++}
+diff --git a/test/utils/noteScreenshots.test.js b/test/utils/noteScreenshots.test.js
+new file mode 100644
+index 00000000..c61b3142
+--- /dev/null
++++ b/test/utils/noteScreenshots.test.js
+@@ -0,0 +1,150 @@
++// Local patch: screenshots pasted into notes (src/utils/noteScreenshots.ts).
++const test = require("node:test");
++const assert = require("node:assert/strict");
++
++const load = () => import("../../src/utils/noteScreenshots.ts");
++const loadLinks = () => import("../../src/helpers/noteMediaLinks.js");
++const loadContent = () => import("../../src/services/ai/noteImageContent.ts");
++
++const t = (key, options) => {
++  if (key === "notes.speaker.label") return `Speaker ${options.n}`;
++  if (key === "notes.speaker.them") return "Them";
++  return key;
++};
++
++const at = (h, m, s = 0) => new Date(2026, 8, 25, h, m, s).getTime();
++const media = (ms, hex = "0a1b2c3d") => `${ms}-${hex}.png`;
++const link = (name, alt = "Screenshot") => `![${alt}](openwhispr-media://image/${name})`;
++
++test("media names carry the paste time and reject anything else", async () => {
++  const { noteMediaNameFromUrl, noteMediaPastedAt, findNoteMediaNames } = await loadLinks();
++  const name = media(at(10, 4));
++  assert.equal(noteMediaNameFromUrl(`openwhispr-media://image/${name}`), name);
++  assert.equal(noteMediaPastedAt(name), at(10, 4));
++  assert.equal(noteMediaNameFromUrl("openwhispr-media://image/../secrets.png"), null);
++  assert.equal(noteMediaNameFromUrl("https://example.com/a.png"), null);
++  const other = media(at(10, 9), "ffffffff");
++  assert.deepEqual(findNoteMediaNames(`${link(name)} x ${link(other)} ${link(name)}`), [
++    name,
++    other,
++  ]);
++});
++
++test("screenshots are numbered in note order and labelled with the paste time", async () => {
++  const { collectNoteScreenshots, labelScreenshotsInMarkdown } = await load();
++  const a = media(at(10, 4));
++  const b = media(at(10, 31), "ffffffff");
++  const notes = `Agenda\n\n${link(a, "Screenshot 10:04")}\n\nBudget ${link(b)}`;
++  const shots = collectNoteScreenshots(notes);
++  assert.deepEqual(
++    shots.map((s) => [s.title, s.label]),
++    [
++      ["Screenshot 1", "Screenshot 1, pasted 10:04"],
++      ["Screenshot 2", "Screenshot 2, pasted 10:31"],
++    ]
++  );
++  assert.equal(
++    labelScreenshotsInMarkdown(notes, shots),
++    "Agenda\n\n[Screenshot 1, pasted 10:04]\n\nBudget [Screenshot 2, pasted 10:31]"
++  );
++  // Other images are left alone.
++  assert.equal(labelScreenshotsInMarkdown("![x](https://e.com/x.png)", shots), "![x](https://e.com/x.png)");
++});
++
++test("transcript gets a marker before the first segment that started after the paste", async () => {
++  const { collectNoteScreenshots, buildLlmTranscriptWithScreenshots } = await load();
++  const segments = [
++    { source: "mic", text: "agendana on viisi", timestamp: at(10, 3, 50) },
++    { source: "system", speaker: "speaker_0", text: "tässä luvut", timestamp: at(10, 4, 20) },
++    { source: "mic", text: "kiitos", timestamp: at(10, 20) },
++  ];
++  const shots = collectNoteScreenshots(
++    [at(10, 4, 5), at(9, 0), at(10, 21)].map((ms, i) => link(media(ms, `0000000${i}`))).join(" ")
++  );
++  assert.equal(
++    buildLlmTranscriptWithScreenshots(segments, {}, "Pasi", t, shots),
++    [
++      "Pasi: agendana on viisi",
++      "[Screenshot 1, pasted 10:04]",
++      "Speaker 1: tässä luvut",
++      "Pasi: kiitos",
++      "[Screenshot 3, pasted 10:21]",
++    ].join("\n")
++  );
++  // Screenshot 2 was pasted an hour before the meeting, so it stays in the notes only.
++});
++
++test("transcript without timestamps is unchanged", async () => {
++  const { collectNoteScreenshots, buildLlmTranscriptWithScreenshots } = await load();
++  const { buildLlmTranscript } = await import("../../src/utils/llmTranscript.ts");
++  const segments = [{ source: "mic", text: "hei" }];
++  const shots = collectNoteScreenshots(link(media(at(10, 4))));
++  assert.equal(
++    buildLlmTranscriptWithScreenshots(segments, {}, "Pasi", t, shots),
++    buildLlmTranscript(segments, {}, "Pasi", t)
++  );
++});
++
++test("instructions list the links only when the action may place images", async () => {
++  const { collectNoteScreenshots, buildScreenshotInstructions } = await load();
++  const name = media(at(10, 4));
++  const shots = collectNoteScreenshots(link(name));
++  const inline = buildScreenshotInstructions(shots, true);
++  assert.match(inline, /The user pasted 1 screenshot into these notes/);
++  assert.ok(inline.includes(`- ![Screenshot 1](openwhispr-media://image/${name})`));
++  const email = buildScreenshotInstructions(shots, false);
++  assert.ok(!email.includes("openwhispr-media://"));
++  assert.match(email, /Don't put images or image links in your output/);
++});
++
++test("output keeps attached screenshots once and drops every other image", async () => {
++  const { collectNoteScreenshots, sanitizeScreenshotLinks } = await load();
++  const a = media(at(10, 4));
++  const shots = collectNoteScreenshots(link(a));
++  const made_up = media(at(10, 5), "deadbeef");
++  const output = [
++    "## Budget",
++    "- Marketing 42 000 EUR",
++    "",
++    link(a, "Screenshot 1"),
++    "",
++    link(a, "Screenshot 1"),
++    "",
++    link(made_up),
++    "",
++    "![logo](https://example.com/logo.png)",
++    "",
++    "## Next",
++  ].join("\n");
++  assert.equal(
++    sanitizeScreenshotLinks(output, shots, true),
++    `## Budget\n- Marketing 42 000 EUR\n\n${link(a, "Screenshot 1")}\n\n## Next`
++  );
++  assert.equal(
++    sanitizeScreenshotLinks(output, shots, false),
++    "## Budget\n- Marketing 42 000 EUR\n\n## Next"
++  );
++  assert.equal(sanitizeScreenshotLinks("no images", shots, true), "no images");
++});
++
++test("user content carries text, instructions, then labelled images", async () => {
++  const { noteImageUserContent } = await loadContent();
++  assert.equal(noteImageUserContent("notes", {}), null);
++  const config = {
++    noteImages: {
++      instructions: "## Screenshots",
++      images: [{ label: "Screenshot 1, pasted 10:04", mediaType: "image/png", data: "AAAA" }],
++    },
++  };
++  assert.deepEqual(noteImageUserContent("notes", config, "chat"), [
++    { type: "text", text: "notes" },
++    { type: "text", text: "## Screenshots" },
++    { type: "text", text: "Screenshot 1, pasted 10:04:" },
++    { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "high" } },
++  ]);
++  assert.deepEqual(noteImageUserContent("notes", config, "responses").at(-1), {
++    type: "input_image",
++    image_url: "data:image/png;base64,AAAA",
++    detail: "high",
++  });
++});

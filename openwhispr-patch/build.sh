@@ -1,6 +1,9 @@
 #!/bin/sh
-# Builds "OpenWhispr Patched": OpenWhispr with realtime-url.patch applied,
+# Builds "OpenWhispr Patched": OpenWhispr with the patches below applied,
 # under its own name and bundle ID so it sits next to the official app.
+#
+#   realtime-url.patch  meeting transcription through the shim
+#   note-images.patch   screenshots pasted into notes, sent to note actions
 #
 #   openwhispr-patch/build.sh [openwhispr-clone] [git-ref]
 #
@@ -37,11 +40,16 @@ git -C "$SRC" rev-parse --verify --quiet "$REF^{commit}" >/dev/null \
 
 if [ -d "$WORK" ]; then
   git -C "$WORK" reset --hard --quiet
+  # Files the patches add; ignored build output (node_modules, dist) stays.
+  git -C "$WORK" clean -fdq
   git -C "$WORK" checkout --quiet --detach "$REF"
 else
   git -C "$SRC" worktree add --detach "$WORK" "$REF"
 fi
-git -C "$WORK" apply "$HERE/realtime-url.patch"
+for PATCH in realtime-url note-images; do
+  git -C "$WORK" apply "$HERE/$PATCH.patch" \
+    || { echo "$PATCH.patch no longer applies to $REF: update it against that release." >&2; exit 1; }
+done
 echo "Building $PRODUCT from OpenWhispr $REF in $WORK"
 
 cd "$WORK"
