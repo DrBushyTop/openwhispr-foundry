@@ -1,0 +1,68 @@
+#!/bin/sh
+# Builds "OpenWhispr Patched": OpenWhispr with realtime-url.patch applied,
+# under its own name and bundle ID so it sits next to the official app.
+#
+#   openwhispr-patch/build.sh [openwhispr-clone] [git-ref]
+#
+# Defaults: ../openwhispr, and the tag matching the installed official app.
+# Builds in a separate git worktree (../openwhispr-build) so the clone stays
+# clean. Needs Node, npm and the Xcode command line tools. The first build
+# downloads OpenWhispr's bundled binaries and models.
+#
+# Signs with the identity from create-signing-cert.sh if it exists, so macOS
+# permissions survive rebuilds. Without it the app is unsigned and macOS asks
+# for permissions again after every rebuild.
+set -eu
+
+APP_ID="net.huuhka.openwhispr-patched"
+PRODUCT="OpenWhispr Patched"
+SIGN_ID="OpenWhispr Patched Local Signing"
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "${1:-$HERE/../../openwhispr}" && pwd)"
+INSTALLED="$(defaults read /Applications/OpenWhispr.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || true)"
+REF="${2:-v${INSTALLED:-missing}}"
+WORK="$(dirname "$SRC")/openwhispr-build"
+
+git -C "$SRC" fetch --tags --quiet
+git -C "$SRC" rev-parse --verify --quiet "$REF^{commit}" >/dev/null \
+  || { echo "unknown ref $REF (pass one as the second argument)" >&2; exit 1; }
+
+if [ -d "$WORK" ]; then
+  git -C "$WORK" reset --hard --quiet
+  git -C "$WORK" checkout --quiet --detach "$REF"
+else
+  git -C "$SRC" worktree add --detach "$WORK" "$REF"
+fi
+git -C "$WORK" apply "$HERE/realtime-url.patch"
+echo "Building $PRODUCT from OpenWhispr $REF in $WORK"
+
+cd "$WORK"
+npm ci
+# `npm run pack` without its fixed unsigned flags: same prepack steps (native
+# helpers, bundled binaries), then electron-builder with our name and bundle ID.
+# identity=null skips electron-builder's signing; sign.js signs below.
+npm run prepack
+npm run build:renderer
+rm -rf dist/mac dist/mac-arm64
+npx electron-builder --mac --dir \
+  -c.appId="$APP_ID" \
+  -c.productName="$PRODUCT" \
+  -c.mac.identity=null \
+  -c.mac.notarize=false
+
+APP="$(find "$WORK/dist" -maxdepth 2 -name "$PRODUCT.app" -type d | head -1)"
+# No update feed: an update would be OpenWhispr's official build.
+rm -f "$APP/Contents/Resources/app-update.yml"
+
+if security find-identity -v -p codesigning | grep -q "\"$SIGN_ID\""; then
+  node "$HERE/sign.js" "$APP" "$SIGN_ID" "$WORK/resources/mac/entitlements.mac.plist"
+else
+  echo "WARNING: no \"$SIGN_ID\" identity (run create-signing-cert.sh)."
+  echo "         The app is unsigned; macOS will ask for permissions again after each rebuild."
+fi
+
+echo
+echo "Built: $APP"
+echo "Quit OpenWhispr (only one of the two can run at a time), then:"
+echo "  rm -rf \"/Applications/$PRODUCT.app\" && cp -R \"$APP\" /Applications/"

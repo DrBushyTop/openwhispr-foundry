@@ -1,0 +1,15 @@
+--- a/src/helpers/openaiRealtimeStreaming.js
++++ b/src/helpers/openaiRealtimeStreaming.js
+@@ -144,7 +144,11 @@
+     this._sessionExpired = false;
+     this._connectionLossNotified = false;
+ 
+-    const url = "wss://api.openai.com/v1/realtime?intent=transcription";
++    // Local patch: OPENWHISPR_OPENAI_REALTIME_URL points the OpenAI Realtime client at
++    // another server speaking the same protocol (e.g. ws://localhost:9447/v1/realtime).
++    const url =
++      process.env.OPENWHISPR_OPENAI_REALTIME_URL ||
++      "wss://api.openai.com/v1/realtime?intent=transcription";
+     debugLogger.debug(`${this.providerLabel} connecting`, this._logContext({ model: this.model }));
+ 
+     // Attested providers (Tinfoil) supply their socket via an async factory.

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
-LABEL=net.huuhka.openwhispr-foundry-shim
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
-echo "Removed $LABEL"
+DOMAIN="gui/$(id -u)"
+for label in net.huuhka.openwhispr-foundry-shim net.huuhka.openwhispr-realtime-env; do
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$label.plist"
+  echo "Removed $label"
+done
+launchctl unsetenv OPENWHISPR_OPENAI_REALTIME_URL
