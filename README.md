@@ -119,6 +119,8 @@ For language models, the Refresh button lists the deployments in `FOUNDRY_CHAT_M
 
 The official OpenWhispr app can't send Note Recording to a local server, so meetings need a patched build. The same build lets you paste screenshots into a note and have note actions send them to the model. [openwhispr-patch/README.md](openwhispr-patch/README.md) covers building it and setting it up.
 
+For meetings, the shim sends your OpenWhispr dictionary and the note's participant names to Azure as a phrase list, and retries segments that fail. It also saves each meeting's audio and its own transcript under `~/Library/Application Support/openwhispr-foundry/meetings` for 14 days, so nothing is lost if a segment fails or a note goes missing. Set `FOUNDRY_MEETING_AUDIO_DAYS=0` in `config.env` to turn that off. [docs/how-it-works.md](docs/how-it-works.md#language-phrases-retries-and-saved-audio) has the details.
+
 ## Troubleshooting
 
 **`az CLI token fetch failed` in the log.** Your az login expired. Run the `az login` from step 1 again. The shim picks up the new login on the next request, no restart needed.

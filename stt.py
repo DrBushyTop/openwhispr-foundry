@@ -119,6 +119,14 @@ def extract_text(response: dict) -> str:
     return " ".join(p.get("text", "") for p in phrases).strip()
 
 
+def extract_locale(response: dict) -> str | None:
+    """Language Azure detected, from the longest phrase ("fi" for MAI, "fi-FI" for LLM Speech)."""
+    phrases = [p for p in response.get("phrases") or [] if p.get("locale")]
+    if not phrases:
+        return None
+    return max(phrases, key=lambda p: p.get("durationMilliseconds") or 0)["locale"]
+
+
 # Upload format per backend, all 16 kHz mono. MAI-Transcribe only takes WAV,
 # MP3 or FLAC. 48 kbps MP3 is ~5x smaller than WAV (81KB vs 430KB for 14s),
 # which cut ~150ms of upload, and MAI's transcripts matched WAV exactly on
@@ -162,6 +170,12 @@ def encode_pcm(pcm: bytes, sample_rate: int, backend: str) -> bytes:
 
 def recognize(audio: bytes, model: str, language: str | None, prompt: str | None) -> str:
     """Send already-encoded audio (see UPLOAD_FORMATS) to Azure and return the text."""
+    return recognize_with_locale(audio, model, language, prompt)[0]
+
+
+def recognize_with_locale(audio: bytes, model: str, language: str | None,
+                          prompt: str | None) -> tuple[str, str | None]:
+    """recognize(), plus the language Azure detected."""
     backend, upstream_model = resolve_model(model)
     endpoint = MAI_ENDPOINT if backend == "mai" else LLM_SPEECH_ENDPOINT
     url = f"{endpoint.rstrip('/')}/speechtotext/transcriptions:transcribe?api-version={SPEECH_API_VERSION}"
@@ -180,7 +194,7 @@ def recognize(audio: bytes, model: str, language: str | None, prompt: str | None
         f"audio={result.get('durationMilliseconds', '?')}ms upload={len(audio) // 1024}KB "
         f"conn={'reused' if reused else 'new'} "
         f"upstream={time.monotonic() - started:.2f}s chars={len(text)}")
-    return text
+    return text, extract_locale(result)
 
 
 def transcribe(audio_path: str, model: str, language: str | None, prompt: str | None) -> str:

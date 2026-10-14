@@ -6,6 +6,12 @@ turn detection. This module plays the server: an energy VAD cuts the stream at
 pauses, each finished segment goes to stt.recognize() on a worker thread, and
 the text comes back as `conversation.item.input_audio_transcription.completed`.
 
+OpenWhispr sends a meeting session no language and no dictionary. The shim
+fills in a phrase list from OpenWhispr's database (phrases.py), and a language
+hint for short segments from what Azure detected on the longer ones. Failed
+segments are retried, and every session's audio and transcript is saved
+(archive.py).
+
 Cutting at pauses instead of fixed intervals keeps words whole. Each stream
 gets a profile (PROFILES): a segment ends at a pause of pause_ms once it's at
 least min_segment_ms long, or at any pause of long_pause_ms. Short segments
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import http.client
 import json
 import os
 import queue
@@ -32,8 +39,10 @@ import uuid
 from array import array
 from collections import deque
 
+import archive
+import phrases
 import stt
-from foundry import log
+from foundry import UpstreamError, log
 from websocket import OP_BINARY, ConnectionClosed, WebSocket
 
 # OpenWhispr sends OpenAI model names (gpt-4o-mini-transcribe...). Anything the
@@ -60,6 +69,26 @@ FORCE_CUT_WINDOW_MS = 3000
 MIN_VOICED_MS = 200        # segments with less voiced audio are noise, not speech
 MIN_RMS = float(os.environ.get("FOUNDRY_VAD_MIN_RMS", "300"))  # int16 units, ~-40 dBFS
 NOISE_FACTOR = 3.0         # voiced = louder than 3x the running noise floor
+
+# MAI guesses the language per segment, and short ones go wrong: a 2 s "öö" came
+# back as Japanese. Segments under SHORT_SEGMENT_MS get the language MAI found in
+# the session's longer segments as a hint. The hint is soft: in testing, clear
+# English with a Finnish hint still came back as English, so meetings that mix
+# languages keep working. Each stream learns its own language; until it has,
+# it borrows the other stream's from the last LANGUAGE_MEMORY_S.
+SHORT_SEGMENT_MS = 4000
+LANGUAGE_MEMORY_S = 1800
+_recent_language: dict = {"language": None, "at": float("-inf")}
+
+RETRY_DELAYS_S = (1, 3)    # a segment gets two more tries after a transient failure
+
+
+def is_transient(exc: Exception) -> bool:
+    """Throttling, Azure outages and network drops are worth retrying; a
+    rejected request or a broken ffmpeg isn't."""
+    if isinstance(exc, UpstreamError):
+        return exc.status in (408, 429) or exc.status >= 500
+    return isinstance(exc, (OSError, http.client.HTTPException))
 
 
 def frame_rms(frame: bytes) -> float:
@@ -177,8 +206,10 @@ class RealtimeSession:
         self.stream = "mic"  # until session.update says otherwise
         self.requested_model = REALTIME_MODEL
         self.stt_model = REALTIME_MODEL
-        self.language: str | None = None
+        self.language: str | None = None   # from the client; OpenWhispr sends none for meetings
         self.prompt: str | None = None
+        self.detected_language: str | None = None
+        self.archive: archive.SessionArchive | None = None
         self.segmenter = self._new_segmenter()
         self.item_id: str | None = None
         self.previous_item_id: str | None = None
@@ -240,7 +271,7 @@ class RealtimeSession:
         self.send({"type": "input_audio_buffer.committed",
                    "item_id": item_id, "previous_item_id": self.previous_item_id})
         self.previous_item_id = item_id
-        self.jobs.put(("segment", item_id, pcm, end_ms - start_ms))
+        self.jobs.put(("segment", item_id, pcm, start_ms, end_ms - start_ms))
 
     # -------------------------------------------------------------- worker
 
@@ -255,13 +286,16 @@ class RealtimeSession:
         if job[0] == "commit":
             self._finish_commit(job[1])
             return
-        _, item_id, pcm, _duration_ms = job
+        _, item_id, pcm, start_ms, duration_ms = job
         try:
-            text = self._transcribe(pcm)
+            text = self._transcribe(pcm, duration_ms)
             failed = None
         except Exception as exc:  # one bad segment must not end a meeting
-            log(f"rt {self.label}: segment {item_id} failed: {exc}")
+            where = f", audio kept in {self.archive.audio_path}" if self.archive else ""
+            log(f"rt {self.label}: segment {item_id} at {archive.clock(start_ms)} failed{where}: {exc}")
             text, failed = "", str(exc)
+        if self.archive and (text or failed):
+            self.archive.line(start_ms, text if not failed else f"(transcription failed: {failed})")
         if self.committing:
             self.after_commit_count += 1
             if text:
@@ -274,10 +308,36 @@ class RealtimeSession:
         else:
             self._send_completed(item_id, text)
 
-    def _transcribe(self, pcm: bytes) -> str:
+    def _transcribe(self, pcm: bytes, duration_ms: int) -> str:
         backend, _ = stt.resolve_model(self.stt_model)
         audio = stt.encode_pcm(pcm, self.sample_rate, backend)
-        return stt.recognize(audio, self.stt_model, self.language, self.prompt)
+        language = self.language or (self._language_hint() if duration_ms < SHORT_SEGMENT_MS else None)
+        prompt = self.prompt or phrases.meeting_prompt()
+        for delay in (*RETRY_DELAYS_S, None):
+            try:
+                text, detected = stt.recognize_with_locale(audio, self.stt_model, language, prompt)
+                break
+            except Exception as exc:
+                if delay is None or not is_transient(exc):
+                    raise
+                log(f"rt {self.label}: {type(exc).__name__}: {exc}; retrying in {delay}s")
+                time.sleep(delay)
+        if detected and language is None and duration_ms >= SHORT_SEGMENT_MS:
+            self._learn_language(detected)
+        return text
+
+    def _language_hint(self) -> str | None:
+        if self.detected_language:
+            return self.detected_language
+        if time.monotonic() - _recent_language["at"] < LANGUAGE_MEMORY_S:
+            return _recent_language["language"]
+        return None
+
+    def _learn_language(self, language: str) -> None:
+        if language != self.detected_language:
+            log(f"rt {self.label}: language {language}")
+        self.detected_language = language
+        _recent_language.update(language=language, at=time.monotonic())
 
     def _send_completed(self, item_id: str, text: str) -> None:
         self.segments_sent += 1
@@ -306,8 +366,7 @@ class RealtimeSession:
             except (binascii.Error, ValueError):
                 self.error("invalid_audio", "audio must be base64 PCM16")
                 return
-            self.audio_bytes += len(pcm)
-            self.segmenter.feed(pcm)
+            self._audio(pcm)
         elif kind == "input_audio_buffer.commit":
             self.committing = True
             self.segmenter.flush()
@@ -345,17 +404,27 @@ class RealtimeSession:
         self.segmenter = self._new_segmenter()
         log(f"rt {self.label}: {self.stream} stream, {PROFILES[self.stream]}")
 
+    def _audio(self, pcm: bytes) -> None:
+        if self.archive is None and archive.enabled():
+            # Opened on the first audio, after session.update set the rate and stream.
+            self.archive = archive.SessionArchive(self.stream, self.session_id, self.sample_rate)
+        if self.archive:
+            self.archive.write(pcm)
+        self.audio_bytes += len(pcm)
+        self.segmenter.feed(pcm)
+
     def run(self) -> None:
         worker = threading.Thread(target=self._worker, daemon=True)
         worker.start()
         log(f"rt {self.label}: open")
+        if archive.enabled():
+            archive.prune()
         self.send({"type": "session.created", "session": self.session_object()})
         try:
             while True:
                 opcode, payload = self.ws.receive()
                 if opcode == OP_BINARY:
-                    self.audio_bytes += len(payload)
-                    self.segmenter.feed(payload)
+                    self._audio(payload)
                     continue
                 try:
                     event = json.loads(payload)
@@ -369,7 +438,10 @@ class RealtimeSession:
         finally:
             self.jobs.put(None)
             self.ws.close()
+            if self.archive:
+                self.archive.close()
             audio_s = self.audio_bytes / (2 * self.sample_rate)
             log(f"rt {self.label} ({self.stream}): closed after {time.monotonic() - self.started:.0f}s, "
                 f"audio={audio_s:.1f}s model={self.stt_model} (asked {self.requested_model}) "
-                f"segments={self.segments_sent}")
+                f"segments={self.segments_sent}"
+                + (f" saved={self.archive.audio_path}" if self.archive else ""))

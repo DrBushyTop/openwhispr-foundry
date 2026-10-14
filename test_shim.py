@@ -17,12 +17,18 @@ import math
 import socket
 import struct
 
+import archive
 import chat
 import foundry
 import foundry_shim as shim
+import phrases
 import realtime
 import stt
 import websocket
+
+# Tests never write meeting audio or read OpenWhispr's real database.
+archive.KEEP_DAYS = 0
+phrases.ENABLED = False
 
 
 class DefinitionTests(unittest.TestCase):
@@ -61,6 +67,13 @@ class DefinitionTests(unittest.TestCase):
     def test_extract_text(self):
         self.assertEqual(stt.extract_text({"combinedPhrases": [{"text": "a"}, {"text": "b"}]}), "a b")
         self.assertEqual(stt.extract_text({}), "")
+
+    def test_extract_locale_from_longest_phrase(self):
+        self.assertEqual(stt.extract_locale({"phrases": [
+            {"text": "ok", "locale": "en", "durationMilliseconds": 400},
+            {"text": "käydään läpi", "locale": "fi", "durationMilliseconds": 3000}]}), "fi")
+        self.assertIsNone(stt.extract_locale({"phrases": [{"text": "x"}]}))
+        self.assertIsNone(stt.extract_locale({}))
 
 
 class ChatAdaptTests(unittest.TestCase):
@@ -291,6 +304,194 @@ class RealtimeSessionTests(unittest.TestCase):
         self.append(session, tone(3500) + silence(2100))
         self.drain(session)
         self.assertIn("conversation.item.input_audio_transcription.failed", ws.types())
+
+
+class TranscribeTests(unittest.TestCase):
+    """RealtimeSession._transcribe: language hints and retries."""
+
+    def setUp(self):
+        realtime._recent_language.update(language=None, at=float("-inf"))
+        self.addCleanup(realtime._recent_language.update, language=None, at=float("-inf"))
+        patcher = mock.patch.object(stt, "encode_pcm", return_value=b"mp3")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.session = realtime.RealtimeSession(FakeSocket(), "test")
+
+    def recognize(self, *results):
+        patcher = mock.patch.object(stt, "recognize_with_locale", side_effect=list(results))
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def test_short_segment_gets_language_of_long_ones(self):
+        recognize = self.recognize(("Käydään budjetti läpi.", "fi"), ("Öö.", "fi"))
+        self.session._transcribe(b"", 8000)
+        self.session._transcribe(b"", 2000)
+        self.assertIsNone(recognize.call_args_list[0].args[2])  # long: auto-detect
+        self.assertEqual(recognize.call_args_list[1].args[2], "fi")
+
+    def test_short_segment_does_not_teach_language(self):
+        recognize = self.recognize(("あの、", "ja"), ("Joo.", "fi"))
+        self.session._transcribe(b"", 2000)
+        self.session._transcribe(b"", 2000)
+        self.assertIsNone(recognize.call_args_list[1].args[2])
+
+    def test_other_stream_language_is_borrowed(self):
+        self.recognize(("Hyvää huomenta kaikille.", "fi"))
+        self.session._transcribe(b"", 8000)
+        other = realtime.RealtimeSession(FakeSocket(), "other")
+        self.assertEqual(other._language_hint(), "fi")
+
+    def test_client_language_wins(self):
+        recognize = self.recognize(("Hello.", "en"))
+        self.session.language = "en"
+        self.session._transcribe(b"", 2000)
+        self.assertEqual(recognize.call_args.args[2], "en")
+
+    def test_meeting_prompt_is_used_without_client_prompt(self):
+        recognize = self.recognize(("x", None), ("y", None))
+        with mock.patch.object(phrases, "meeting_prompt", return_value="Liisa, Foundry"):
+            self.session._transcribe(b"", 8000)
+            self.session.prompt = "Dictionary"
+            self.session._transcribe(b"", 8000)
+        self.assertEqual(recognize.call_args_list[0].args[3], "Liisa, Foundry")
+        self.assertEqual(recognize.call_args_list[1].args[3], "Dictionary")
+
+    def test_transient_failure_is_retried(self):
+        recognize = self.recognize(foundry.UpstreamError(503, b"busy"), ConnectionResetError(), ("Hei.", "fi"))
+        with mock.patch.object(realtime.time, "sleep") as sleep:
+            self.assertEqual(self.session._transcribe(b"", 8000), "Hei.")
+        self.assertEqual(recognize.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(realtime.RETRY_DELAYS_S))
+
+    def test_gives_up_after_retries(self):
+        self.recognize(*[foundry.UpstreamError(429, b"slow down")] * 3)
+        with mock.patch.object(realtime.time, "sleep"), self.assertRaises(foundry.UpstreamError):
+            self.session._transcribe(b"", 8000)
+
+    def test_rejected_request_is_not_retried(self):
+        recognize = self.recognize(foundry.UpstreamError(400, b"bad"))
+        with mock.patch.object(realtime.time, "sleep") as sleep, self.assertRaises(foundry.UpstreamError):
+            self.session._transcribe(b"", 8000)
+        self.assertEqual(recognize.call_count, 1)
+        sleep.assert_not_called()
+
+
+class PhrasesTests(unittest.TestCase):
+    def make_db(self, notes, words):
+        import os
+        import sqlite3
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, participants TEXT, deleted_at TEXT,"
+            " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);"
+            "CREATE TABLE custom_dictionary (id INTEGER PRIMARY KEY, word TEXT, deleted_at TEXT);")
+        for participants, age_minutes, deleted in notes:
+            conn.execute("INSERT INTO notes (participants, deleted_at, updated_at)"
+                         " VALUES (?, ?, datetime('now', ?))",
+                         (json.dumps(participants), deleted, f"-{age_minutes} minutes"))
+        for word, deleted in words:
+            conn.execute("INSERT INTO custom_dictionary (word, deleted_at) VALUES (?, ?)", (word, deleted))
+        conn.commit()
+        conn.close()
+        return path
+
+    def attendee(self, name, me=False):
+        return {"email": "x@example.com", "displayName": name, "responseStatus": None, "self": me}
+
+    def test_participant_names(self):
+        self.assertEqual(phrases.participant_names(json.dumps([
+            self.attendee("Pasi", me=True), self.attendee("Liisa Korhonen"),
+            self.attendee("Al Smith"), self.attendee(None), self.attendee("bob@example.com")])),
+            ["Liisa Korhonen", "Liisa", "Al Smith"])
+        self.assertEqual(phrases.participant_names("not json"), [])
+        self.assertEqual(phrases.participant_names(None), [])
+
+    def test_recording_note_and_dictionary(self):
+        path = self.make_db(
+            notes=[([self.attendee("Old Meeting")], 30, None),          # too old
+                   ([self.attendee("Liisa Korhonen")], 1, None),        # the recording note
+                   ([self.attendee("Deleted Person")], 0, "2026-10-14")],
+            words=[("Foundry", None), ("foundry", None), ("Gone", "2026-10-14"), ("a, b", None)])
+        self.assertEqual(phrases.read_phrases(path), ["Liisa Korhonen", "Liisa", "Foundry"])
+
+    def test_no_recent_note_gives_dictionary_only(self):
+        path = self.make_db(notes=[([self.attendee("Old Meeting")], 30, None)], words=[("Foundry", None)])
+        self.assertEqual(phrases.read_phrases(path), ["Foundry"])
+
+    def test_cache_keeps_last_list_when_db_unreadable(self):
+        cache = phrases.PhraseCache("/nonexistent/transcriptions.db")
+        cache._phrases = ["Foundry"]
+        with mock.patch.object(phrases, "log"):
+            self.assertEqual(cache.get(), ["Foundry"])
+
+
+class ArchiveTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.root = tempfile.mkdtemp()
+        import shutil
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def test_clock(self):
+        self.assertEqual(archive.clock(3_723_456), "01:02:03")
+
+    def test_prune_removes_old_files_and_empty_days(self):
+        import os
+        import time
+
+        old_day, new_day = os.path.join(self.root, "2026-09-01"), os.path.join(self.root, "2026-10-14")
+        os.makedirs(old_day)
+        os.makedirs(new_day)
+        for path in (os.path.join(old_day, "a.mp3"), os.path.join(new_day, "b.mp3")):
+            open(path, "w").close()
+        twenty_days_ago = time.time() - 20 * 86400
+        os.utime(os.path.join(old_day, "a.mp3"), (twenty_days_ago, twenty_days_ago))
+        with mock.patch.object(archive, "KEEP_DAYS", 14):
+            self.assertEqual(archive.prune(self.root), 1)
+        self.assertEqual(os.listdir(self.root), ["2026-10-14"])
+
+    def test_session_archive_writes_audio_and_lines(self):
+        with mock.patch.object(archive.subprocess, "Popen") as popen:
+            a = archive.SessionArchive("mic", "sess_0123456789abcdef", 24000, root=self.root)
+            a.write(b"\x00\x01")
+            a.line(65_000, "Hei kaikki.")
+            a.close()
+        cmd = popen.call_args.args[0]
+        self.assertEqual(cmd[-1], a.audio_path)
+        self.assertIn("24000", cmd)
+        popen.return_value.stdin.write.assert_called_once_with(b"\x00\x01")
+        with open(a.text_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertTrue(lines[0].startswith("# mic stream"))
+        self.assertEqual(lines[1], "[00:01:05] Hei kaikki.")
+
+    def test_dead_ffmpeg_turns_archive_off(self):
+        with mock.patch.object(archive.subprocess, "Popen") as popen, mock.patch.object(archive, "log"):
+            popen.return_value.stdin.write.side_effect = BrokenPipeError()
+            a = archive.SessionArchive("system", "sess_x", 24000, root=self.root)
+            a.write(b"\x00")
+            a.write(b"\x00")
+        self.assertEqual(popen.return_value.stdin.write.call_count, 1)
+
+    def test_session_archives_segments_and_failures(self):
+        ws = FakeSocket()
+        session = realtime.RealtimeSession(ws, "test")
+        session._transcribe = mock.Mock(side_effect=["First.", RuntimeError("azure down")])
+        session.archive = mock.Mock(audio_path="x.mp3")
+        session.handle({"type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(tone(3500) + silence(2100) + tone(3500) + silence(2100)).decode()})
+        with mock.patch.object(realtime, "log"):
+            while not session.jobs.empty():
+                session._process(session.jobs.get_nowait())
+        texts = [c.args[1] for c in session.archive.line.call_args_list]
+        self.assertEqual(texts, ["First.", "(transcription failed: azure down)"])
+        session.archive.write.assert_called_once()
 
 
 class WebSocketTests(unittest.TestCase):

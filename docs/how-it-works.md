@@ -17,7 +17,9 @@ Paths work with or without a `/v1` prefix.
 | `foundry_shim.py` | HTTP server, routes, `main`. The LaunchAgent runs this. |
 | `foundry.py` | `config.env` loading, az CLI token, HTTPS connection pool, `open_azure`, logging |
 | `stt.py` | model and locale mapping, Azure Speech request, audio conversion |
-| `realtime.py` | OpenAI Realtime transcription protocol, pause detection, segment worker |
+| `realtime.py` | OpenAI Realtime transcription protocol, pause detection, segment worker, language hints, retries |
+| `phrases.py` | meeting phrase list from OpenWhispr's dictionary and the recording note's participants |
+| `archive.py` | saves each meeting stream's audio and transcript, and deletes old ones |
 | `websocket.py` | minimal RFC 6455 server |
 | `chat.py` | chat completions forwarding and parameter fixes |
 | `test_shim.py` | tests, run with `python3 test_shim.py` |
@@ -76,7 +78,18 @@ Why these numbers. The first real meeting used 600ms/3s rules for both streams a
 
 Each segment is encoded to MP3 in memory and sent to MAI-Transcribe-2 on a worker thread, one per stream, so results arrive in order. When recording stops, OpenWhispr sends `commit` and stops waiting at the first transcript after it. So after a commit the shim sends everything still pending as one combined transcript. OpenWhispr labels speakers locally after the meeting. The shim only returns text.
 
-OpenWhispr sends OpenAI model names (`gpt-4o-mini-transcribe`), which map to `FOUNDRY_REALTIME_MODEL` (default `mai-transcribe-2`). A realtime session gets no dictionary words or language hint from OpenWhispr, so MAI auto-detects the language.
+OpenWhispr sends OpenAI model names (`gpt-4o-mini-transcribe`), which map to `FOUNDRY_REALTIME_MODEL` (default `mai-transcribe-2`).
+
+### Language, phrases, retries and saved audio
+
+OpenWhispr sends a meeting session no language and no dictionary, so the shim fills them in:
+
+- **Language hint for short segments.** MAI detects the language per segment, and short ones go wrong (the "öö" above). Segments of 4s or more go out without a hint, and the shim remembers the language MAI detected in them. Shorter segments get that language as a hint. A stream that hasn't had a long segment yet borrows the other stream's language from the last 30 minutes. The hint is soft: a clear English "Okay, sounds good." with a Finnish hint still came back as English, so meetings that mix languages keep working.
+- **Phrase list.** `phrases.py` reads OpenWhispr's database (`transcriptions.db`, read-only) every minute: the custom dictionary, and the participant names of the note being recorded, full name and first name, without you. The database doesn't record which note is recording. The shim takes the most recently updated note with participants, updated in the last 3 minutes; the recording note saves its transcript every 30s. Names come first, and the list stops at 500 phrases.
+- **Retries.** A segment that fails with a 408, 429, 5xx or a network error is retried after 1s and again after 3s. Later segments of the same stream wait meanwhile, so the order stays right. Other errors fail the segment at once.
+- **Saved audio and transcript.** Each stream is saved to `~/Library/Application Support/openwhispr-foundry/meetings/<date>/<time>-<mic|system>-<id>.mp3`, silences included, at 16 kHz mono 48 kbps, about 22 MB an hour per stream. Next to it, a `.txt` has one `[hh:mm:ss] text` line per segment, failed ones included, and the times are offsets into the MP3. A failed segment's log line names the file and offset. Files older than 14 days are deleted when a meeting starts. `FOUNDRY_MEETING_AUDIO_DAYS=0` turns saving off.
+
+Tested on Azure with speech from macOS `say`: a 7.8s Finnish sentence went out without a hint and set the language to `fi`. A 3.2s "Joo, no niin." and a 3.7s "Okay, sounds good." both went out with the `fi` hint and came back right. The saved MP3 was 17.25s, exactly the audio sent.
 
 ### Test results
 
@@ -126,6 +139,10 @@ Every setting has a default that matches my resources above. The shim reads over
 | `FOUNDRY_CHAT_MODELS` | comma-separated list returned by `/models` |
 | `FOUNDRY_REALTIME_MODEL` | backend for meetings, default `mai-transcribe-2` |
 | `FOUNDRY_VAD_MIN_RMS` | quietest audio counted as speech in meetings, default 300 |
+| `FOUNDRY_MEETING_PHRASES` | `0` stops reading phrases from OpenWhispr's database |
+| `OPENWHISPR_DATA_DIR` | OpenWhispr's settings folder, default `~/Library/Application Support/open-whispr` |
+| `FOUNDRY_MEETING_AUDIO_DIR` | where meeting audio is saved |
+| `FOUNDRY_MEETING_AUDIO_DAYS` | days to keep saved meeting audio, default 14, `0` saves nothing |
 | `SHIM_HOST` | listen address, default `127.0.0.1` |
 | `SHIM_PORT` | listen port, default 9447 ("WHIS" on a phone keypad) |
 
@@ -135,4 +152,4 @@ A few names aren't settings, because nothing breaks if you keep them: the Launch
 
 ## Logs
 
-Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. Realtime sessions write `rt` lines when they open and close.
+Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. Realtime sessions write `rt` lines when they open and close, when a stream's language changes, and for each retry or failed segment. `phrases:` lines show how many phrases meetings get.
