@@ -1,0 +1,407 @@
+diff --git a/main.js b/main.js
+index 2ac395883..f757625e2 100644
+--- a/main.js
++++ b/main.js
+@@ -280,6 +280,7 @@ const dockManager = require("./src/helpers/dockManager");
+ const autoStart = require("./src/helpers/autoStart");
+ const IPCHandlers = require("./src/helpers/ipcHandlers");
+ const CliBridge = require("./src/helpers/cliBridge");
++const MobileDictationServer = require("./src/helpers/mobileDictation");
+ const UpdateManager = require("./src/updater");
+ const GlobeKeyManager = require("./src/helpers/globeKeyManager");
+ const DevServerManager = require("./src/helpers/devServerManager");
+@@ -343,6 +344,7 @@ let meetingAecManager = null;
+ let qdrantManager = null;
+ let ipcHandlers = null;
+ let cliBridge = null;
++let mobileDictation = null;
+ let globeKeyAlertShown = false;
+ let macAccessibilityFeaturesReady = false;
+ let startMacAccessibilityFeatures = null;
+@@ -1010,6 +1012,12 @@ async function startApp() {
+     cliBridge = null;
+   });
+ 
++  mobileDictation = new MobileDictationServer(windowManager);
++  mobileDictation.start().catch((err) => {
++    debugLogger.error("Mobile dictation failed to start", { error: err.message });
++    mobileDictation = null;
++  });
++
+   await migrateCookieToBearerToken();
+ 
+   applyOpenWhisprOriginHeader(session.defaultSession);
+@@ -1988,6 +1996,10 @@ function performSyncTeardown() {
+     cliBridge.stop().catch(() => {});
+     cliBridge = null;
+   }
++  if (mobileDictation) {
++    mobileDictation.stop().catch(() => {});
++    mobileDictation = null;
++  }
+   if (hotkeyManager) {
+     hotkeyManager.unregisterAll();
+   } else {
+diff --git a/preload.js b/preload.js
+index e479fa898..36e93952d 100644
+--- a/preload.js
++++ b/preload.js
+@@ -88,6 +88,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
+   showDictationPanel: () => ipcRenderer.invoke("show-dictation-panel"),
+   captureDictationTarget: () => ipcRenderer.invoke("capture-dictation-target"),
+   onToggleDictation: registerListener("toggle-dictation", (callback) => () => callback()),
++  onMobileDictationRequest: registerListener(
++    "mobile-dictation-request",
++    (callback) => (_event, request) => callback(request)
++  ),
++  sendMobileDictationResult: (id, result) =>
++    ipcRenderer.invoke("mobile-dictation-result", id, result),
+   onToggleVoiceAgent: registerListener("toggle-voice-agent", (callback) => () => callback()),
+   onToggleTranslation: registerListener("toggle-translation", (callback) => () => callback()),
+   onOpenAssistantPanel: registerListener("open-assistant-panel", (callback) => () => callback()),
+diff --git a/src/App.jsx b/src/App.jsx
+index 82d0763fa..a879eff88 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -7,6 +7,7 @@ import { formatHotkeyListLabel } from "./utils/hotkeys";
+ import { useWindowDrag } from "./hooks/useWindowDrag";
+ import { useLinuxPillInteractivity } from "./hooks/useLinuxPillInteractivity";
+ import { useAudioRecording } from "./hooks/useAudioRecording";
++import { useMobileDictation } from "./hooks/useMobileDictation";
+ import { useAssistantPanel } from "./hooks/useAssistantPanel";
+ import { useOnboardingAssistantDemo } from "./hooks/useOnboardingAssistantDemo";
+ import { useLiveTranscriptPanel } from "./hooks/useLiveTranscriptPanel";
+@@ -237,6 +238,7 @@ export default function App() {
+     assistantOpenRef,
+   });
+   const isVisuallyProcessing = isProcessing || isPreparing || isStopping;
++  useMobileDictation();
+ 
+   useLayoutEffect(() => {
+     recordingControlsRef.current = {
+diff --git a/src/helpers/audioManager.js b/src/helpers/audioManager.js
+index cdf8bbae9..70cd31349 100644
+--- a/src/helpers/audioManager.js
++++ b/src/helpers/audioManager.js
+@@ -3057,7 +3057,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
+         route = resolveReasoningRoute(
+           normalizedText,
+           settings,
+-          agentName,
++          // Mobile dictation has no desktop selection or panel for the agent to act on.
++          this.disableAgentRoute ? null : agentName,
+           this.voiceAgentRequested,
+           this.translationRequested,
+           screenContext
+diff --git a/src/helpers/mobileDictation.js b/src/helpers/mobileDictation.js
+new file mode 100644
+index 000000000..666dd8bb8
+--- /dev/null
++++ b/src/helpers/mobileDictation.js
+@@ -0,0 +1,186 @@
++// Dictation for a phone: audio comes in over HTTP, goes through the same
++// transcription and cleanup pipeline as a hotkey dictation, and the text goes
++// back in the response instead of being pasted.
++//
++// Off unless ~/.openwhispr/mobile-dictation.json exists with {port, token}.
++// Listens on 127.0.0.1 only; reach it from the phone through `tailscale serve`.
++// Requests run one at a time in the dictation panel's renderer, which owns the
++// settings, prompts and dictionary (see useMobileDictation.js).
++const http = require("http");
++const fs = require("fs");
++const os = require("os");
++const path = require("path");
++const crypto = require("crypto");
++const { ipcMain } = require("electron");
++const debugLogger = require("./debugLogger");
++
++const HOST = "127.0.0.1";
++const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
++const RENDERER_TIMEOUT_MS = 120 * 1000;
++
++function getConfigPath() {
++  return path.join(os.homedir(), ".openwhispr", "mobile-dictation.json");
++}
++
++function readConfig() {
++  let raw;
++  try {
++    raw = fs.readFileSync(getConfigPath(), "utf8");
++  } catch (err) {
++    if (err.code === "ENOENT") return null;
++    throw err;
++  }
++  const config = JSON.parse(raw);
++  if (!Number.isInteger(config.port) || typeof config.token !== "string") {
++    throw new Error("mobile-dictation.json needs an integer port and a token");
++  }
++  if (config.token.length < 32) throw new Error("mobile-dictation.json token is too short");
++  return config;
++}
++
++function sendJson(res, status, body) {
++  const json = JSON.stringify(body);
++  res.writeHead(status, {
++    "Content-Type": "application/json; charset=utf-8",
++    "Content-Length": Buffer.byteLength(json),
++  });
++  res.end(json);
++}
++
++function readAudioBody(req) {
++  return new Promise((resolve, reject) => {
++    const declared = Number(req.headers["content-length"]);
++    if (declared > MAX_AUDIO_BYTES) return reject(httpError(413, "Audio is too large"));
++    const chunks = [];
++    let size = 0;
++    req.on("data", (chunk) => {
++      size += chunk.length;
++      if (size > MAX_AUDIO_BYTES) {
++        req.destroy();
++        reject(httpError(413, "Audio is too large"));
++        return;
++      }
++      chunks.push(chunk);
++    });
++    req.on("end", () => resolve(Buffer.concat(chunks, size)));
++    req.on("error", reject);
++  });
++}
++
++function httpError(status, message) {
++  const err = new Error(message);
++  err.status = status;
++  return err;
++}
++
++class MobileDictationServer {
++  constructor(windowManager) {
++    this.windowManager = windowManager;
++    this.server = null;
++    this.token = null;
++    this.pending = new Map();
++    // Requests share one AudioManager in the renderer, so they run in order.
++    this.queue = Promise.resolve();
++  }
++
++  async start() {
++    const config = readConfig();
++    if (!config) return;
++    this.token = config.token;
++
++    ipcMain.handle("mobile-dictation-result", (event, id, result) => {
++      const entry = this.pending.get(id);
++      if (!entry || event.sender !== entry.sender) return;
++      this.pending.delete(id);
++      clearTimeout(entry.timer);
++      entry.resolve(result);
++    });
++
++    this.server = http.createServer((req, res) => {
++      this._handle(req, res).catch((err) => {
++        const status = err.status || 500;
++        if (status === 500) {
++          debugLogger.error("Mobile dictation failed", { error: err.message }, "mobile");
++        }
++        if (!res.headersSent) sendJson(res, status, { error: err.message });
++      });
++    });
++    await new Promise((resolve, reject) => {
++      this.server.once("error", reject);
++      this.server.listen(config.port, HOST, () => {
++        this.server.removeListener("error", reject);
++        resolve();
++      });
++    });
++    debugLogger.info("Mobile dictation listening", { port: config.port }, "mobile");
++  }
++
++  async stop() {
++    if (!this.server) return;
++    ipcMain.removeHandler("mobile-dictation-result");
++    for (const entry of this.pending.values()) {
++      clearTimeout(entry.timer);
++      entry.reject(httpError(503, "OpenWhispr is quitting"));
++    }
++    this.pending.clear();
++    await new Promise((resolve) => this.server.close(() => resolve()));
++    this.server = null;
++  }
++
++  async _handle(req, res) {
++    const auth = Buffer.from(req.headers["authorization"] || "");
++    const expected = Buffer.from(`Bearer ${this.token}`);
++    if (auth.length !== expected.length || !crypto.timingSafeEqual(auth, expected)) {
++      throw httpError(401, "Unauthorized");
++    }
++
++    const { pathname } = new URL(req.url || "/", `http://${HOST}`);
++    if (req.method === "GET" && pathname === "/v1/health") {
++      sendJson(res, 200, await this._enqueue("summary"));
++      return;
++    }
++    if (req.method === "POST" && pathname === "/v1/dictate") {
++      const mimeType = String(req.headers["content-type"] || "")
++        .split(";")[0]
++        .trim();
++      if (!mimeType.startsWith("audio/")) throw httpError(415, "Send audio/wav or audio/mp4");
++      const audio = await readAudioBody(req);
++      if (!audio.length) throw httpError(400, "No audio");
++      const started = Date.now();
++      const result = await this._enqueue("dictate", { audio, mimeType });
++      if (result.error) throw httpError(502, result.error);
++      debugLogger.info(
++        "Mobile dictation done",
++        { bytes: audio.length, ms: Date.now() - started, chars: result.text.length },
++        "mobile"
++      );
++      sendJson(res, 200, result);
++      return;
++    }
++    throw httpError(404, "Not found");
++  }
++
++  _enqueue(kind, payload = {}) {
++    const run = this.queue.then(() => this._ask(kind, payload));
++    this.queue = run.catch(() => {});
++    return run;
++  }
++
++  _ask(kind, payload) {
++    const win = this.windowManager?.mainWindow;
++    if (!win || win.isDestroyed()) {
++      return Promise.reject(httpError(503, "OpenWhispr's dictation window isn't running"));
++    }
++    const id = crypto.randomUUID();
++    return new Promise((resolve, reject) => {
++      const timer = setTimeout(() => {
++        this.pending.delete(id);
++        reject(httpError(504, "OpenWhispr didn't answer in time"));
++      }, RENDERER_TIMEOUT_MS);
++      this.pending.set(id, { resolve, reject, timer, sender: win.webContents });
++      win.webContents.send("mobile-dictation-request", { id, kind, ...payload });
++    });
++  }
++}
++
++module.exports = MobileDictationServer;
+diff --git a/src/hooks/useMobileDictation.js b/src/hooks/useMobileDictation.js
+new file mode 100644
+index 000000000..efab0cb21
+--- /dev/null
++++ b/src/hooks/useMobileDictation.js
+@@ -0,0 +1,94 @@
++import { useEffect } from "react";
++import AudioManager from "../helpers/audioManager";
++import logger from "../utils/logger";
++import { getSettings, getEffectiveCleanupModel } from "../stores/settingsStore";
++import { expandSnippets } from "../utils/snippets";
++
++// Answers mobile dictation requests from the main process (mobileDictation.js).
++// A dictation runs on its own AudioManager so it can't cancel a hotkey dictation
++// in progress. Nothing is pasted, saved to history or shown in the pill.
++let manager = null;
++
++function getManager() {
++  manager ??= new AudioManager();
++  manager.disableAgentRoute = true;
++  return manager;
++}
++
++function summary() {
++  const s = getSettings();
++  const local = s.useLocalWhisper;
++  return {
++    transcription: {
++      mode: local ? `local-${s.localTranscriptionProvider}` : s.transcriptionMode,
++      model: local ? null : getManager().getTranscriptionModel(),
++      url: s.transcriptionMode === "self-hosted" ? s.remoteTranscriptionUrl : null,
++    },
++    cleanup: {
++      enabled: !!s.useCleanupModel,
++      mode: s.cleanupMode,
++      model: getEffectiveCleanupModel() || null,
++      customPrompt: !!s.customPrompts?.cleanup?.trim(),
++    },
++    language: s.preferredLanguage,
++    dictionaryWords: s.customDictionary?.length ?? 0,
++    snippets: s.snippets?.length ?? 0,
++  };
++}
++
++function dictate(audio, mimeType) {
++  const manager = getManager();
++  return new Promise((resolve, reject) => {
++    let settled = false;
++    const settle = (fn, value) => {
++      if (settled) return;
++      settled = true;
++      fn(value);
++    };
++    manager.onTranscriptionComplete = (result) => settle(resolve, result);
++    manager.onNoAudio = () => settle(resolve, { success: true, text: "" });
++    manager.onError = (error) => {
++      // "default" errors are notices about a command that still ran.
++      if (error?.variant === "default") return;
++      const message = error?.description || error?.title || "Transcription failed";
++      // Silence or no speech: an empty result, not a failure worth retrying.
++      if (/No text transcribed/i.test(message)) return settle(resolve, { success: true, text: "" });
++      settle(reject, new Error(message));
++    };
++    manager.isProcessing = true;
++    manager
++      .processAudio(new Blob([audio], { type: mimeType }), {})
++      .then(() => settle(reject, new Error("Transcription was skipped")))
++      .catch((error) => settle(reject, error));
++  });
++}
++
++async function handle(request) {
++  if (request.kind === "summary") return summary();
++  const result = await dictate(request.audio, request.mimeType);
++  const text = result.text?.trim() ? expandSnippets(result.text, getSettings().snippets) : "";
++  return {
++    text,
++    rawText: result.rawText ?? text,
++    cleanupFailed: !!result.cleanupFailure,
++    source: result.source ?? null,
++    timings: result.timings ?? null,
++  };
++}
++
++export function useMobileDictation() {
++  useEffect(() => {
++    const api = window.electronAPI;
++    if (!api?.onMobileDictationRequest) return undefined;
++    return api.onMobileDictationRequest(async (request) => {
++      let result;
++      try {
++        result = await handle(request);
++      } catch (error) {
++        logger.error("Mobile dictation failed", { error: error.message }, "mobile");
++        result = { error: error.message };
++      }
++      api.sendMobileDictationResult(request.id, result);
++    });
++  }, []);
++}
+diff --git a/src/types/electron.ts b/src/types/electron.ts
+index edaf03848..64beaa41e 100644
+--- a/src/types/electron.ts
++++ b/src/types/electron.ts
+@@ -1157,6 +1157,15 @@ declare global {
+       showDictationPanel: () => Promise<void>;
+       captureDictationTarget?: () => Promise<{ success: boolean; pid: number | null }>;
+       onToggleDictation: (callback: () => void) => () => void;
++      onMobileDictationRequest?: (
++        callback: (request: {
++          id: string;
++          kind: "summary" | "dictate";
++          audio?: Uint8Array;
++          mimeType?: string;
++        }) => void
++      ) => () => void;
++      sendMobileDictationResult?: (id: string, result: unknown) => Promise<void>;
+       onToggleVoiceAgent?: (callback: () => void) => () => void;
+       onToggleTranslation?: (callback: () => void) => () => void;
+       onOpenAssistantPanel?: (callback: () => void) => () => void;

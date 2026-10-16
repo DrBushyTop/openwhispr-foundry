@@ -1,9 +1,10 @@
 # OpenWhispr Patched
 
-Scripts that build a patched copy of OpenWhispr, installed as a separate app called **OpenWhispr Patched**. You only need it for two things the official app can't do:
+Scripts that build a patched copy of OpenWhispr, installed as a separate app called **OpenWhispr Patched**. You only need it for three things the official app can't do:
 
 - **Meeting transcription through the shim.** Note Recording streams to Azure via the shim instead of to OpenAI.
 - **Screenshots in notes.** Paste a slide into a meeting note, and note actions like Generate Notes send it to the model with the transcript.
+- **Dictation from your phone.** The [Whispr Mic](../android/README.md) Android app sends recordings to the app over Tailscale and gets back text cleaned up with your settings.
 
 Plain dictation and text cleanup work with the official app. You don't need this for those.
 
@@ -37,7 +38,7 @@ OpenWhispr's Note Recording can't use a self-hosted URL. The settings card says 
 
 `realtime-url.patch` changes that one line to read `OPENWHISPR_OPENAI_REALTIME_URL` first. The shim's `install-launchagent.sh` sets that variable at login to `ws://localhost:9447/v1/realtime?intent=transcription`. The official app ignores the variable.
 
-`note-images.patch` adds the screenshot support, described [below](#screenshots-in-notes).
+`note-images.patch` adds the screenshot support, described [below](#screenshots-in-notes). `mobile-dictation.patch` adds the endpoint for the phone app, described under [phone dictation](#phone-dictation).
 
 ## Before you build
 
@@ -108,6 +109,58 @@ Tested in the installed app on a meeting note with a Finnish transcript and a pa
 - **Cleanup.** At startup the app deletes files in `note-media` that no live note links to, once they're a day old. A deleted note's screenshots go the next time the app starts.
 - **Request size.** The shim accepts chat requests up to 64 MB for this.
 
+## Phone dictation
+
+`mobile-dictation.patch` lets the [Whispr Mic](../android/README.md) Android app dictate through this app. A recording from the phone goes through the same steps as a hotkey dictation: your speech-to-text settings, the dictionary, cleanup with your prompt, and snippets. The text comes back to the phone instead of being pasted on the Mac. Settings stay in one place, the Mac app.
+
+It's off until you turn it on. From the repo root:
+
+```sh
+openwhispr-patch/enable-mobile-dictation.sh              # https://<mac>.<tailnet>.ts.net:8450
+openwhispr-patch/enable-mobile-dictation.sh 8452         # another port
+openwhispr-patch/enable-mobile-dictation.sh svc:whispr   # https://whispr.<tailnet>.ts.net, a Tailscale Service
+```
+
+The script:
+
+- creates `~/.openwhispr/mobile-dictation.json` with the local port (9448) and a random 64-character token, readable only by you. Re-runs keep the token. Delete the file to get a new one.
+- publishes the port to your tailnet with Tailscale Serve: `tailscale serve --bg --https=8450 http://127.0.0.1:9448`, or `tailscale serve --service=svc:whispr --https=443 http://127.0.0.1:9448` for a Service.
+- prints the URL and token to enter in the phone app, and a `curl` to check it.
+
+Restart the app afterwards so it reads the file. To turn it off, run `tailscale serve --https=8450 off` (or `tailscale serve clear svc:whispr`) and delete the file.
+
+The app needs to be open and the Mac awake for the phone to reach it.
+
+### A short URL with a Tailscale Service
+
+A [Tailscale Service](https://tailscale.com/docs/features/tailscale-services) gives the endpoint its own name, like `https://whispr.<tailnet>.ts.net`, with no port. It needs some setup in the admin console first:
+
+1. **Tag the Mac.** Only tagged machines can host a Service. Add a tag under Access controls → Tags (M1 uses `tag:ocm1`), then on the machine's page choose Edit ACL tags.
+2. **Create the Service.** Under Services, add one named `whispr` with port `tcp:443`.
+3. **Let the Mac host it.** In the policy file, add the tag as an auto approver for the Service. `autogroup:member` doesn't match a tagged machine.
+
+   ```json
+   "autoApprovers": { "services": { "svc:whispr": ["tag:ocm1"] } }
+   ```
+
+4. **Allow your devices to reach it.** Add a grant from your user (or group) to `svc:whispr` on `tcp:443`.
+5. **Run the script** with `svc:whispr`.
+
+If the URL doesn't connect and the Service page lists no hosts, the Mac advertised the Service before it was approved. Advertise it again with `tailscale serve drain svc:whispr; tailscale serve advertise svc:whispr`. The first request after that can take a few seconds while Tailscale gets a certificate for the new name.
+
+### The endpoint
+
+The app listens on 127.0.0.1 only, so only Tailscale Serve (or something else on the Mac) can reach it. Every request needs `Authorization: Bearer <token>`.
+
+- `GET /v1/health` returns a summary of the settings dictations use: speech-to-text mode and model, whether cleanup is on, its model and whether you have a custom prompt, language, and how many dictionary words and snippets there are. The phone app shows this after the connection test.
+- `POST /v1/dictate` takes the audio as the raw body, with `Content-Type: audio/wav` (or another `audio/*` type), up to 25 MB. It returns `{"text", "rawText", "cleanupFailed", "source", "timings"}`. `text` is empty if there was no speech.
+
+Errors come back as `{"error": "..."}` with 401 for a wrong token, 413 for too much audio, 415 for a non-audio body, 502 when transcription fails, 503 when the dictation window isn't running, and 504 after two minutes without an answer.
+
+Dictations run one at a time. The main process (`src/helpers/mobileDictation.js`) passes the audio to the dictation window, where `src/hooks/useMobileDictation.js` runs it through a separate `AudioManager`, so a phone dictation never interrupts one on the Mac. The agent route is off for these: a dictation that starts with the agent's name is cleaned up like any other, rather than sent to the agent.
+
+Tested from M4 over Tailscale to the build on M1: a 5-second clip came back cleaned up in 3.3 seconds (1.7 s speech-to-text with LLM Speech, 1.5 s cleanup with gpt-5.4-mini).
+
 ## Updating
 
 The patched app has no update feed, so nothing tells you about new releases. Check with `gh release list --repo OpenWhispr/openwhispr --limit 3`, or watch the repo's releases on GitHub. To update:
@@ -144,7 +197,7 @@ Without the certificate, `build.sh` still builds, but prints a warning and leave
 ## What build.sh does
 
 1. Checks out the release in a separate git worktree (`../openwhispr-build`), so your clone stays clean.
-2. Applies `realtime-url.patch` and `note-images.patch`.
+2. Applies `realtime-url.patch`, `note-images.patch` and `mobile-dictation.patch`.
 3. Runs `npm ci`, then the realtime smoke test (`smoke-test.js`) against the running shim.
 4. Runs OpenWhispr's own prepack steps, which compile the native helpers and download the bundled binaries.
 5. Runs `electron-builder --mac --dir` with the new name and bundle ID, and removes the update feed.
@@ -166,3 +219,5 @@ Without the certificate, `build.sh` still builds, but prints a warning and leave
 | `smoke-test.js` | streams audio through the new client into the shim |
 | `realtime-url.patch` | reads `OPENWHISPR_OPENAI_REALTIME_URL` for meetings |
 | `note-images.patch` | screenshots in notes |
+| `mobile-dictation.patch` | the endpoint for phone dictation |
+| `enable-mobile-dictation.sh` | turns on phone dictation and publishes it with Tailscale Serve |

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds may use plain HTTP to the emulator's host, for testing against
+     OpenWhispr on the machine running the emulator: http://10.0.2.2:9448 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

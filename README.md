@@ -9,6 +9,7 @@ What works:
 - **Dictation** with MAI-Transcribe-2 or LLM Speech. Your OpenWhispr dictionary goes along as a phrase list. A 14s clip takes about 0.4s.
 - **Text cleanup** with gpt-5.4-mini and other Foundry deployments, about 1s per dictation.
 - **Meeting transcription and screenshots in notes.** These need a patched build of OpenWhispr, see [openwhispr-patch](openwhispr-patch/README.md).
+- **Dictation from an Android phone**, through the patched app and Tailscale, with the same models, prompt and dictionary. See [android](android/README.md).
 
 ## Quickstart
 
@@ -153,5 +154,6 @@ This stops the shim, removes both LaunchAgents and unsets the meetings variable.
 
 - [docs/how-it-works.md](docs/how-it-works.md): code layout, Azure endpoints, audio formats, meeting segmentation, parameter fixes, settings and the measurements behind the defaults.
 - [openwhispr-patch/README.md](openwhispr-patch/README.md): the patched OpenWhispr app.
+- [android/README.md](android/README.md): the Whispr Mic phone app.
 
 Run the tests with `python3 test_shim.py`.

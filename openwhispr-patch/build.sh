@@ -4,6 +4,7 @@
 #
 #   realtime-url.patch  meeting transcription through the shim
 #   note-images.patch   screenshots pasted into notes, sent to note actions
+#   mobile-dictation.patch  dictation from a phone through OpenWhispr's settings
 #
 #   openwhispr-patch/build.sh [openwhispr-clone] [git-ref]
 #
@@ -52,7 +53,7 @@ if [ -d "$WORK" ]; then
 else
   git -C "$SRC" worktree add --detach "$WORK" "$REF"
 fi
-for PATCH in realtime-url note-images; do
+for PATCH in realtime-url note-images mobile-dictation; do
   git -C "$WORK" apply "$HERE/$PATCH.patch" \
     || { echo "$PATCH.patch no longer applies to $REF: update it against that release." >&2; exit 1; }
 done
