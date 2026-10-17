@@ -50,7 +50,7 @@ Open **Whispr Mic**. The Setup section at the top shows what's still missing.
 
 Tap into any text field. The mic appears above the keyboard, on the right.
 
-- **Dictate.** Tap the mic and start talking; the button turns red. Tap it again to send. A spinner shows while OpenWhispr works, then the text is typed at the cursor. If you had text selected, the dictation replaces it.
+- **Dictate.** Tap the mic and start talking; the button turns red. Tap it again to send. A spinner shows while OpenWhispr works, then the text is typed at the cursor. If you had text selected, the dictation replaces it. The screen stays on until the text is in, so it doesn't lock halfway through a long dictation.
 - **Cancel.** Tap the small ✕ next to the button. It cancels a recording, or stops waiting while OpenWhispr is still working.
 - **If sending fails**, the button turns orange and keeps the recording. Tap it to try again, or tap ✕ to throw the recording away. The recording is dropped if you move to a text field in another app, or after 10 minutes, so it can't end up somewhere you didn't mean.
 - **Move the button.** Hold it until it turns blue, then drag it. It stays where you drop it, in every app, at the same height above the keyboard. A quick swipe doesn't move it, so you can't move it by accident.

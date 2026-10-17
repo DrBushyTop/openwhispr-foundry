@@ -431,6 +431,8 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     private fun setState(newState: MicState) {
         state = newState
         button.render(newState)
+        // A screen lock mid-dictation leaves no field to type the text into.
+        buttonWindow.keepScreenOn(newState == MicState.STARTING || newState == MicState.RECORDING || newState == MicState.WORKING)
         updateChip()
         if (newState == MicState.IDLE || newState == MicState.RETRY) scheduleUpdate()
     }
@@ -573,6 +575,18 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
             params.x = x
             params.y = y
             // The system may have removed the view already.
+            if (shown) runCatching { windowManager.updateViewLayout(view, params) }
+        }
+
+        /** Holds off the screen timeout while this window is visible. */
+        fun keepScreenOn(on: Boolean) {
+            val flags = if (on) {
+                params.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            } else {
+                params.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+            }
+            if (flags == params.flags) return
+            params.flags = flags
             if (shown) runCatching { windowManager.updateViewLayout(view, params) }
         }
 
