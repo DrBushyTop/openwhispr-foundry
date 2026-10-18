@@ -40,7 +40,9 @@ object LearnedWords {
         val open = PendingIntent.getActivity(
             context,
             0,
-            Intent(context, DictionaryActivity::class.java),
+            Intent(context, SettingsActivity::class.java)
+                .putExtra(SettingsActivity.EXTRA_TAB, SettingsActivity.Tab.DICTIONARY.name)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
         manager.notify(

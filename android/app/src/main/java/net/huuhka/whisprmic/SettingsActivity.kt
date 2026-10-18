@@ -9,14 +9,18 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -24,18 +28,27 @@ import android.widget.Toast
 import java.util.concurrent.Executors
 import org.json.JSONObject
 
-/** Permissions, the OpenWhispr server, which apps get the mic, and the button itself. */
+/**
+ * Whispr Mic's settings, in three tabs: the dictionary and the apps the mic
+ * shows in, which you come back to, and the setup, which you mostly don't.
+ * Opens on the dictionary, or on the setup until that's complete.
+ */
 class SettingsActivity : Activity() {
+    enum class Tab(val label: String) { DICTIONARY("Dictionary"), APPS("Apps"), SETUP("Setup") }
+
     private lateinit var prefs: Prefs
     private lateinit var serverUrl: EditText
     private lateinit var token: EditText
-    private lateinit var appFilter: RadioGroup
-    private lateinit var appsSummary: TextView
-    private lateinit var chooseApps: Button
     private lateinit var status: TextView
     private lateinit var connection: TextView
     private lateinit var microphoneButton: Button
     private lateinit var accessibilityButton: Button
+    private lateinit var dictionaryPage: DictionaryPage
+    private lateinit var appsPage: AppsPage
+    private lateinit var setupPage: View
+    private val tabLabels = mutableMapOf<Tab, TextView>()
+    private val tabMarks = mutableMapOf<Tab, View>()
+    private var tab = Tab.DICTIONARY
     private val worker = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,19 +56,105 @@ class SettingsActivity : Activity() {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         prefs = Prefs(this)
 
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val pad = dp(20)
-            setPadding(pad, 0, pad, pad)
+        dictionaryPage = DictionaryPage(this, prefs, worker)
+        appsPage = AppsPage(this, prefs, worker)
+        setupPage = setupPage()
+        val pages = FrameLayout(this).apply {
+            addView(dictionaryPage)
+            addView(appsPage)
+            addView(setupPage)
         }
-        column.addView(
-            TextView(this).apply {
-                text = getString(R.string.app_name)
-                textSize = 26f
-                setPadding(0, dp(20), 0, 0)
+        setContentView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                // Takes the initial focus, so no tab opens with the keyboard up.
+                isFocusableInTouchMode = true
+                descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+                padForSystemBars()
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.app_name)
+                        textSize = 24f
+                        setPadding(dp(16), dp(16), dp(16), dp(8))
+                    },
+                )
+                addView(tabBar())
+                addView(pages, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             },
         )
-        column.addView(heading("Setup"))
+        val saved = savedInstanceState?.getString(EXTRA_TAB)
+        // onResume loads the dictionary next.
+        show(tabFrom(saved) ?: tabFrom(intent.getStringExtra(EXTRA_TAB)) ?: if (setupComplete()) Tab.DICTIONARY else Tab.SETUP, load = false)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        tabFrom(intent.getStringExtra(EXTRA_TAB))?.let(::show)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(EXTRA_TAB, tab.name)
+    }
+
+    private fun tabFrom(name: String?) = Tab.entries.firstOrNull { it.name == name }
+
+    private fun tabBar() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        val accent = TypedValue().also { theme.resolveAttribute(android.R.attr.colorAccent, it, true) }.data
+        for (t in Tab.entries) {
+            val label = TextView(context).apply {
+                text = t.label
+                textSize = 15f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(12), 0, dp(10))
+            }
+            val mark = View(context).apply { setBackgroundColor(accent) }
+            tabLabels[t] = label
+            tabMarks[t] = mark
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    isClickable = true
+                    setOnClickListener { show(t) }
+                    addView(label)
+                    addView(mark, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(3)))
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+    }
+
+    private fun show(newTab: Tab, load: Boolean = true) {
+        tab = newTab
+        // A field on the tab being left would otherwise keep the keyboard up.
+        currentFocus?.let {
+            getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0)
+            it.clearFocus()
+        }
+        dictionaryPage.visibility = if (tab == Tab.DICTIONARY) View.VISIBLE else View.GONE
+        appsPage.visibility = if (tab == Tab.APPS) View.VISIBLE else View.GONE
+        setupPage.visibility = if (tab == Tab.SETUP) View.VISIBLE else View.GONE
+        for (t in Tab.entries) {
+            val selected = t == tab
+            tabLabels.getValue(t).apply {
+                alpha = if (selected) 1f else 0.6f
+                setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            }
+            tabMarks.getValue(t).visibility = if (selected) View.VISIBLE else View.INVISIBLE
+        }
+        if (load && tab == Tab.DICTIONARY) dictionaryPage.reload()
+    }
+
+    /** The Setup tab: permissions, the server, the mic button, and how to use it. */
+    private fun setupPage(): View {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = dp(16)
+            setPadding(pad, 0, pad, pad)
+        }
+        column.addView(heading("Status"))
         status = TextView(this).apply { textSize = 15f }
         column.addView(status)
         microphoneButton = button("Allow microphone and notifications") {
@@ -83,30 +182,6 @@ class SettingsActivity : Activity() {
         }
         column.addView(connection)
 
-        column.addView(heading("Where the mic shows"))
-        appFilter = RadioGroup(this).apply {
-            addView(RadioButton(context).apply {
-                id = View.generateViewId()
-                text = "In every app"
-                tag = AppFilter.ALL_EXCEPT_HIDDEN
-            })
-            addView(RadioButton(context).apply {
-                id = View.generateViewId()
-                text = "Only in apps I choose"
-                tag = AppFilter.ONLY_SHOWN
-            })
-        }
-        column.addView(appFilter)
-        appsSummary = TextView(this).apply {
-            textSize = 14f
-            alpha = 0.8f
-            setPadding(0, dp(4), 0, 0)
-        }
-        column.addView(appsSummary)
-        chooseApps = button("") { startActivity(Intent(this, AppPickerActivity::class.java)) }
-        column.addView(chooseApps)
-        column.addView(hint("It never shows in password fields."))
-
         column.addView(heading("Mic button"))
         column.addView(
             Switch(this).apply {
@@ -123,35 +198,25 @@ class SettingsActivity : Activity() {
             },
         )
 
-        column.addView(heading("Dictionary"))
-        column.addView(hint("OpenWhispr's word list, and learning from your corrections."))
-        column.addView(button("Edit the dictionary") { startActivity(Intent(this, DictionaryActivity::class.java)) })
-
         column.addView(heading("How to use it"))
         column.addView(
             hint(
                 "Tap the mic to start, and tap it again to send. Tap ✕ beside it to cancel.\n\n" +
                     "If sending fails, the mic turns orange: tap it to try again, or ✕ to discard the recording.\n\n" +
                     "To move the mic, hold it until it turns blue, then drag. It stays where you drop it. " +
-                    "Drop it on \"Hide in…\" at the top of the screen to hide it in that app.",
+                    "Drop it on \"Hide in…\" at the top of the screen to hide it in that app. " +
+                    "Bring it back in the Apps tab.",
             ),
         )
-        setContentView(
-            ScrollView(this).apply {
-                // Takes the initial focus, so the screen doesn't open scrolled to a field with the keyboard up.
-                isFocusableInTouchMode = true
-                descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
-                clipToPadding = false
-                padForSystemBars()
-                addView(column)
-            },
-        )
+        return ScrollView(this).apply { addView(column) }
     }
 
     override fun onResume() {
         super.onResume()
         refreshStatus()
-        refreshApps()
+        // The mic's "Hide in" and new learned words change these while the app is in the background.
+        appsPage.refresh()
+        if (tab == Tab.DICTIONARY) dictionaryPage.reload()
     }
 
     override fun onPause() {
@@ -169,12 +234,18 @@ class SettingsActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun microphoneAllowed() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    // Android hides toasts from background apps without this, so errors would go unseen.
+    // Before Android 13, notifications need no permission.
+    private fun notificationsAllowed() = Build.VERSION.SDK_INT < 33 ||
+        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    private fun setupComplete() = microphoneAllowed() && notificationsAllowed() && accessibilityEnabled() && prefs.isConfigured
+
     private fun refreshStatus() {
-        val microphone = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        // Android hides toasts from background apps without this, so errors would go unseen.
-        // Before Android 13, notifications need no permission.
-        val notifications = Build.VERSION.SDK_INT < 33 ||
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val microphone = microphoneAllowed()
+        val notifications = notificationsAllowed()
         val accessibility = accessibilityEnabled()
         microphoneButton.visibility = if (microphone && notifications) View.GONE else View.VISIBLE
         accessibilityButton.visibility = if (accessibility) View.GONE else View.VISIBLE
@@ -184,28 +255,13 @@ class SettingsActivity : Activity() {
             (if (accessibility) "✓" else "✗") + " Mic button turned on in Accessibility",
             (if (prefs.isConfigured) "✓" else "✗") + " Server and token set",
         ).joinToString("\n")
-    }
-
-    private fun refreshApps() {
-        val filter = prefs.appFilter
-        appFilter.setOnCheckedChangeListener(null)
-        appFilter.check(appFilter.findViewWithTag<RadioButton>(filter).id)
-        appFilter.setOnCheckedChangeListener { group, id ->
-            prefs.appFilter = group.findViewById<RadioButton>(id).tag as AppFilter
-            refreshApps()
-        }
-        val names = prefs.filterApps.map { AppPickerActivity.appLabel(this, it) }.sorted()
-        val list = when (names.size) {
-            0 -> null
-            in 1..3 -> names.joinToString(", ")
-            else -> names.take(2).joinToString(", ") + " and ${names.size - 2} more"
-        }
-        if (filter == AppFilter.ONLY_SHOWN) {
-            appsSummary.text = if (list == null) "No apps chosen yet, so the mic doesn't show anywhere." else "Shows in $list."
-            chooseApps.text = "Choose apps"
+        // A dot on the tab while something is missing, so it's found from the other tabs.
+        tabLabels.getValue(Tab.SETUP).text = if (setupComplete()) {
+            Tab.SETUP.label
         } else {
-            appsSummary.text = if (list == null) "Not hidden in any app." else "Hidden in $list."
-            chooseApps.text = "Choose apps to hide it in"
+            SpannableString("${Tab.SETUP.label} ●").apply {
+                setSpan(ForegroundColorSpan(0xFFE5484D.toInt()), length - 1, length, 0)
+            }
         }
     }
 
@@ -292,4 +348,9 @@ class SettingsActivity : Activity() {
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    companion object {
+        /** A [Tab] name, to open on that tab. */
+        const val EXTRA_TAB = "tab"
+    }
 }

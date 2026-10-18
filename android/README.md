@@ -40,7 +40,7 @@ The APK is at `app/build/outputs/apk/debug/app-debug.apk`. Install it either way
 
 ## Set up the phone
 
-Open **Whispr Mic**. The Setup section at the top shows what's still missing.
+Open **Whispr Mic**. It opens on the **Setup** tab until everything is in place; the tab has a red dot while something is missing, and its Status list shows what.
 
 1. **Allow microphone and notifications.** Notifications are needed to see error messages, because Android hides messages from background apps without them.
 2. **Turn on the mic button in Accessibility.** This opens Android's accessibility settings. Find Whispr Mic and turn it on. If the switch is greyed out and says "Restricted setting", go to Settings → Apps → Whispr Mic, open the ⋮ menu, choose **Allow restricted settings**, and try again.
@@ -54,7 +54,7 @@ Tap into any text field. The mic appears above the keyboard, on the right.
 - **Cancel.** Tap the small ✕ next to the button. It cancels a recording, or stops waiting while OpenWhispr is still working.
 - **If sending fails**, the button turns orange and keeps the recording. Tap it to try again, or tap ✕ to throw the recording away. The recording is dropped if you move to a text field in another app, or after 10 minutes, so it can't end up somewhere you didn't mean.
 - **Move the button.** Hold it until it turns blue, then drag it. It stays where you drop it, in every app, at the same height above the keyboard. A quick swipe doesn't move it, so you can't move it by accident.
-- **Hide it in an app.** While you're holding the button, a "Hide in <app>" bar appears at the top of the screen. Drop the button on it. Bring it back in Whispr Mic → Choose apps.
+- **Hide it in an app.** While you're holding the button, a "Hide in <app>" bar appears at the top of the screen. Drop the button on it. Bring it back in Whispr Mic's **Apps** tab.
 
 The first time the button appears, a short tip explains tap and hold.
 
@@ -62,22 +62,23 @@ The first time the button appears, a short tip explains tap and hold.
 
 Like OpenWhispr's auto-learn on the desktop, the app notices when you fix a misheard word. After a dictation goes in, it follows that field until you send the message, leave the field, or a minute passes. If you changed words, it sends the dictation and your edited version to OpenWhispr, which picks out the corrected words and adds them to the dictionary, marked as learned. Future dictations on the phone and the Mac then listen for them.
 
-A toast and a notification say which words were added. **Undo** in the notification removes them again. Only the latest notification is kept; remove older words in the dictionary screen.
+A toast and a notification say which words were added. **Undo** in the notification removes them again. Only the latest notification is kept; remove older words in the Dictionary tab.
 
 OpenWhispr uses the same rules as on the desktop: only one-for-one word swaps that sound alike count, not rewrites, short or common words, or words already in the dictionary. The phone also skips changed endings, like "meeting" to "meetings", which are usually grammar or a Gboard suggestion rather than a misheard word.
 
-Turn it off with **Learn from my corrections** in the dictionary screen. OpenWhispr's own auto-learn setting on the Mac also applies; the dictionary screen says if that one is off.
+Turn it off with **Learn from my corrections** in the Dictionary tab. OpenWhispr's own auto-learn setting on the Mac also applies; the tab says if that one is off.
 
 ### The dictionary
 
-Settings → **Edit the dictionary** lists OpenWhispr's dictionary, newest first, with learned words marked. Type in the field at the top to find a word; tap **Add** to add what you typed. Tap a word to fix its spelling or delete it. Changes are saved straight to OpenWhispr on the Mac, and apply to the next dictation.
+The **Dictionary** tab, where the app opens, lists OpenWhispr's dictionary, newest first, with learned words marked. Type in the field at the top to find a word; tap **Add** to add what you typed. Tap a word to fix its spelling or delete it. Changes are saved straight to OpenWhispr on the Mac, and apply to the next dictation.
 
 ## Settings
 
-- **Where the mic shows.** "In every app" is the default; **Choose apps to hide it in** opens a searchable list of your apps. "Only in apps I choose" flips it around, so the mic shows in the apps you tick and nowhere else. Each mode keeps its own list. The mic never shows in password fields or in Whispr Mic itself.
-- **Lock it in place.** Holding the button no longer picks it up.
-- **Move it back to the default spot.** Puts the button back on the right, just above the keyboard.
-- **Edit the dictionary.** See [The dictionary](#the-dictionary).
+The app has three tabs. The two you come back to are first; the one you set once is last.
+
+- **Dictionary.** See [The dictionary](#the-dictionary).
+- **Apps.** Where the mic shows. "In every app" is the default, and the list below is the apps to hide it in. "Only in apps I choose" flips it around, so the mic shows in the apps you tick and nowhere else. Each mode keeps its own list. The list is searchable, with ticked apps first. The mic never shows in password fields or in Whispr Mic itself.
+- **Setup.** What's still missing, the server URL and token, and the button's options: **Lock it in place** (holding the button no longer picks it up) and **Move it back to the default spot** (back on the right, just above the keyboard). A short how-to is at the bottom.
 
 ## Troubleshooting
 
@@ -93,7 +94,7 @@ Settings → **Edit the dictionary** lists OpenWhispr's dictionary, newest first
 
 **"The recording was silent."** Android gave the app silence instead of audio, usually because another app holds the microphone.
 
-**"OpenWhispr Patched on the Mac needs updating for this"** in the dictionary screen. The Mac app was built before the dictionary endpoints. Rebuild it with the current `mobile-dictation.patch`.
+**"OpenWhispr Patched on the Mac needs updating for this"** in the Dictionary tab. The Mac app was built before the dictionary endpoints. Rebuild it with the current `mobile-dictation.patch`.
 
 **No mic button.** Check that the accessibility service is still on; Android turns it off when the app is force-stopped or updated through some installers. Also check that the app isn't hidden under Where the mic shows.
 
@@ -117,8 +118,8 @@ The server side is in [openwhispr-patch/README.md](../openwhispr-patch/README.md
 | `DictationClient.kt` | talks to OpenWhispr |
 | `TextInsertion.kt` | works out the field's new text and cursor, and what the user changed afterwards |
 | `LearnedWords.kt` | the "Added to the dictionary" notification and its Undo |
-| `DictionaryActivity.kt` | the dictionary screen |
-| `SettingsActivity.kt`, `AppPickerActivity.kt` | the settings screen and the app list |
+| `SettingsActivity.kt` | the settings, its tabs and the Setup tab |
+| `DictionaryPage.kt`, `AppsPage.kt` | the Dictionary and Apps tabs |
 | `Prefs.kt` | stored settings |
 
 Run the unit tests with `./gradlew testDebugUnitTest`.

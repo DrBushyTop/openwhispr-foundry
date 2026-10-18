@@ -210,7 +210,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         // Hiding the mic mid-dictation or with an unsent recording would lose it, so only offer it when idle.
         carriedFrom = fieldPackage.takeIf { state == MicState.IDLE }
         carriedFrom?.let { app ->
-            hideTarget.setApp(AppPickerActivity.appLabel(this, app))
+            hideTarget.setApp(appLabel(this, app))
             hideTarget.armed = false
             val statusBar = windowManager.currentWindowMetrics.windowInsets.getInsets(WindowInsets.Type.statusBars()).top
             targetWindow.moveTo(0, statusBar + dp(16))
@@ -246,7 +246,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         if (hideIn != null) {
             prefs.hideMicIn(hideIn)
             hide()
-            toast("Mic hidden in ${AppPickerActivity.appLabel(this, hideIn)}. You can bring it back in Whispr Mic.")
+            toast("Mic hidden in ${appLabel(this, hideIn)}. You can bring it back in Whispr Mic → Apps.")
             return
         }
         val p = buttonWindow.params
@@ -476,7 +476,11 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
             else -> return true
         }
         toast(problem)
-        startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        startActivity(
+            Intent(this, SettingsActivity::class.java)
+                .putExtra(SettingsActivity.EXTRA_TAB, SettingsActivity.Tab.SETUP.name)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        )
         return false
     }
 

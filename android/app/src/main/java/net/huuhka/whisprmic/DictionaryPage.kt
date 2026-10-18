@@ -2,14 +2,12 @@ package net.huuhka.whisprmic
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.view.inputmethod.EditorInfo
 import android.widget.BaseAdapter
 import android.widget.Button
@@ -19,57 +17,40 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.Switch
 import android.widget.TextView
-import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
 
 /**
- * OpenWhispr's dictionary, read and edited on the Mac through the server: the
- * words it listens for, including the ones learned from corrections. The field
+ * The Dictionary tab: OpenWhispr's dictionary, read and edited on the Mac
+ * through the server, including the words learned from corrections. The field
  * at the top finds words as you type and adds the word in it.
  */
-class DictionaryActivity : Activity() {
-    private lateinit var prefs: Prefs
-    private lateinit var input: EditText
-    private lateinit var addButton: Button
-    private lateinit var autoLearnOff: TextView
-    private lateinit var status: TextView
-    private lateinit var adapter: WordAdapter
+class DictionaryPage(private val activity: Activity, private val prefs: Prefs, private val worker: ExecutorService) :
+    LinearLayout(activity) {
+    private val input: EditText
+    private val addButton: Button
+    private val autoLearnOff: TextView
+    private val status: TextView
+    private val adapter = WordAdapter()
     private var words = emptyList<DictionaryWord>()
     private var visible = emptyList<DictionaryWord>()
     /** The last load failed, so the status line shows that instead of the list's state. */
     private var error: String? = null
     private var loaded = false
-    private val worker = Executors.newSingleThreadExecutor()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        prefs = Prefs(this)
-
+    init {
+        orientation = VERTICAL
         val pad = dp(16)
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            // Takes the initial focus, so the keyboard doesn't open over the list.
-            isFocusableInTouchMode = true
-            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
-            padForSystemBars()
-        }
+        val column = this
         column.addView(
-            TextView(this).apply {
-                text = "Dictionary"
-                textSize = 24f
-                setPadding(pad, dp(20), pad, 0)
-            },
-        )
-        column.addView(
-            TextView(this).apply {
+            TextView(context).apply {
                 text = "Names and terms OpenWhispr listens for. It's the same dictionary as on the Mac."
                 textSize = 14f
                 alpha = 0.8f
-                setPadding(pad, dp(4), pad, dp(8))
+                setPadding(pad, dp(12), pad, dp(4))
             },
         )
         column.addView(
-            Switch(this).apply {
+            Switch(context).apply {
                 text = "Learn from my corrections"
                 isChecked = prefs.learnCorrections
                 setPadding(pad, dp(8), pad, 0)
@@ -77,7 +58,7 @@ class DictionaryActivity : Activity() {
             },
         )
         column.addView(
-            TextView(this).apply {
+            TextView(context).apply {
                 text = "If you fix a misheard word after a dictation, before sending it, the word is added here, marked learned. " +
                     "A notification lets you undo it."
                 textSize = 13f
@@ -85,7 +66,7 @@ class DictionaryActivity : Activity() {
                 setPadding(pad, dp(4), pad, 0)
             },
         )
-        autoLearnOff = TextView(this).apply {
+        autoLearnOff = TextView(context).apply {
             text = "Auto-learn is off in OpenWhispr's settings on the Mac, so nothing is learned."
             textSize = 13f
             setPadding(pad, dp(4), pad, 0)
@@ -93,12 +74,12 @@ class DictionaryActivity : Activity() {
         }
         column.addView(autoLearnOff)
 
-        val addRow = LinearLayout(this).apply {
+        val addRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(pad, dp(12), pad, 0)
         }
-        input = EditText(this).apply {
+        input = EditText(context).apply {
             hint = "Find or add a word"
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -116,34 +97,28 @@ class DictionaryActivity : Activity() {
             )
         }
         addRow.addView(input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        addButton = Button(this).apply {
+        addButton = Button(context).apply {
             text = "Add"
             setOnClickListener { add() }
         }
         addRow.addView(addButton)
         column.addView(addRow)
 
-        status = TextView(this).apply {
+        status = TextView(context).apply {
             gravity = Gravity.CENTER
             setPadding(pad, dp(24), pad, pad)
         }
         column.addView(status)
-        adapter = WordAdapter()
-        val list = ListView(this).apply {
-            adapter = this@DictionaryActivity.adapter
+        val list = ListView(context).apply {
+            adapter = this@DictionaryPage.adapter
             setOnItemClickListener { _, _, position, _ -> edit(visible[position]) }
         }
         column.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        setContentView(column)
-
         render()
-        run({ it.dictionary() })
     }
 
-    override fun onDestroy() {
-        worker.shutdownNow()
-        super.onDestroy()
-    }
+    /** Fetches the dictionary again, for words learned since it was last shown. */
+    fun reload() = run({ it.dictionary() })
 
     private fun add() {
         val word = input.text.toString().trim()
@@ -156,17 +131,17 @@ class DictionaryActivity : Activity() {
     }
 
     private fun edit(word: DictionaryWord) {
-        val field = EditText(this).apply {
+        val field = EditText(context).apply {
             setText(word.word)
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSelection(word.word.length)
         }
-        val box = FrameLayout(this).apply {
+        val box = FrameLayout(context).apply {
             setPadding(dp(20), dp(8), dp(20), 0)
             addView(field)
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(activity)
             .setTitle(if (word.learned) "Edit learned word" else "Edit word")
             .setView(box)
             .setPositiveButton("Save") { _, _ ->
@@ -183,15 +158,15 @@ class DictionaryActivity : Activity() {
     /** Runs a request off the main thread and shows the dictionary it returns. */
     private fun run(request: (DictationClient) -> Dictionary, onDone: () -> Unit = {}) {
         if (!prefs.isConfigured) {
-            error = "Set the server URL and token in Whispr Mic first."
+            error = "Set the server URL and token in the Setup tab first."
             return render()
         }
         val client = DictationClient(prefs.serverUrl, prefs.token)
         addButton.isEnabled = false
         worker.execute {
             val result = runCatching { request(client) }
-            runOnUiThread {
-                if (isDestroyed) return@runOnUiThread
+            activity.runOnUiThread {
+                if (activity.isDestroyed) return@runOnUiThread
                 addButton.isEnabled = true
                 result.onSuccess {
                     words = it.words
@@ -234,7 +209,7 @@ class DictionaryActivity : Activity() {
         }
     }
 
-    private inner class Row : LinearLayout(this@DictionaryActivity) {
+    private inner class Row : LinearLayout(activity) {
         val word = TextView(context).apply { textSize = 16f }
         val learned = TextView(context).apply {
             text = "learned"
