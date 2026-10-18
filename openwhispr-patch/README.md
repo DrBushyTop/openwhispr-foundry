@@ -111,7 +111,7 @@ Tested in the installed app on a meeting note with a Finnish transcript and a pa
 
 ## Phone dictation
 
-`mobile-dictation.patch` lets the [Whispr Mic](../android/README.md) Android app dictate through this app. A recording from the phone goes through the same steps as a hotkey dictation: your speech-to-text settings, the dictionary, cleanup with your prompt, and snippets. The text comes back to the phone instead of being pasted on the Mac. Settings stay in one place, the Mac app.
+`mobile-dictation.patch` lets the [Whispr Mic](../android/README.md) Android app dictate through this app. A recording from the phone goes through the same steps as a hotkey dictation: your speech-to-text settings, the dictionary, cleanup with your prompt, and snippets. The text comes back to the phone instead of being pasted on the Mac. Settings stay in one place, the Mac app. The phone can also edit the dictionary and teach it words you corrected, so you don't need the Mac's screen for that.
 
 It's off until you turn it on. From the repo root:
 
@@ -154,8 +154,13 @@ The app listens on 127.0.0.1 only, so only Tailscale Serve (or something else on
 
 - `GET /v1/health` returns a summary of the settings dictations use: speech-to-text mode and model, whether cleanup is on, its model and whether you have a custom prompt, language, and how many dictionary words and snippets there are. The phone app shows this after the connection test.
 - `POST /v1/dictate` takes the audio as the raw body, with `Content-Type: audio/wav` (or another `audio/*` type), up to 25 MB. It returns `{"text", "rawText", "cleanupFailed", "source", "timings"}`. `text` is empty if there was no speech.
+- `GET /v1/dictionary` returns `{"words": [{"word", "learned"}], "autoLearn"}`: the dictionary oldest first, `learned` for words auto-learn added, and whether OpenWhispr's auto-learn setting is on.
+- `POST /v1/dictionary` takes `{"add": [...], "remove": [...]}` and returns the dictionary as above. A rename is both in one request. Words added this way count as typed by hand.
+- `POST /v1/learn` takes `{"original", "edited"}`: a dictation, and the text after the user's corrections. It runs OpenWhispr's own correction learner (`src/utils/correctionLearner.js`, the one desktop auto-learn uses) against the dictionary, skips words where only the ending changed, adds the rest as learned, and returns `{"words": [...], "autoLearn"}`. With auto-learn off in OpenWhispr it adds nothing.
 
-Errors come back as `{"error": "..."}` with 401 for a wrong token, 413 for too much audio, 415 for a non-audio body, 502 when transcription fails, 503 when the dictation window isn't running, and 504 after two minutes without an answer.
+The dictionary requests write to OpenWhispr's database directly, like its CLI bridge, and tell the app's windows, so the next dictation and the Settings page see the change. Changes sync to OpenWhispr's cloud the same way as desktop auto-learn ones.
+
+Errors come back as `{"error": "..."}` with 400 for a malformed request, 401 for a wrong token, 413 for too much audio, 415 for a non-audio body, 502 when transcription fails, 503 when the dictation window isn't running, and 504 after two minutes without an answer.
 
 Dictations run one at a time. The main process (`src/helpers/mobileDictation.js`) passes the audio to the dictation window, where `src/hooks/useMobileDictation.js` runs it through a separate `AudioManager`, so a phone dictation never interrupts one on the Mac. The agent route is off for these: a dictation that starts with the agent's name is cleaned up like any other, rather than sent to the agent.
 

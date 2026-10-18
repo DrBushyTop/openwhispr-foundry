@@ -3,7 +3,8 @@ package net.huuhka.whisprmic
 /** A text field's content and selection, as accessibility reports them. */
 data class FieldText(val text: String, val selectionStart: Int, val selectionEnd: Int)
 
-data class Insertion(val text: String, val cursor: Int)
+/** The field's new text. The dictation, with any spaces added around it, runs from [start] to [cursor]. */
+data class Insertion(val text: String, val start: Int, val cursor: Int)
 
 /**
  * Puts dictated text at the cursor, replacing any selection, with a space on
@@ -20,7 +21,7 @@ fun insertDictation(field: FieldText, dictated: String): Insertion {
     var insert = dictated.trim()
     if (before.isNotEmpty() && !before.last().isWhitespace()) insert = " $insert"
     if (after.isNotEmpty() && !after.first().isWhitespace()) insert = "$insert "
-    return Insertion(before + insert + after, start + insert.length)
+    return Insertion(before + insert + after, start, start + insert.length)
 }
 
 /**
@@ -35,4 +36,36 @@ fun realFieldText(text: CharSequence?, hint: CharSequence?, showingHint: Boolean
     if (showingHint || !hasCursor) return ""
     if (hint != null && shown == hint.toString()) return ""
     return shown
+}
+
+/**
+ * Follows a field after a dictation went in, to see how the user corrected it
+ * before sending. [original] is the dictated text.
+ */
+class EditWatch(val original: String, private val inserted: Insertion) {
+    private val before = inserted.text.substring(0, inserted.start)
+    private val after = inserted.text.substring(inserted.cursor)
+    private var latest = inserted.text
+
+    /**
+     * Takes the field's text now. An empty field was sent or cleared, which ends
+     * the watch: that returns false, and the text before it is kept.
+     */
+    fun update(text: String): Boolean {
+        if (text.isEmpty()) return false
+        latest = text
+        return true
+    }
+
+    /**
+     * The dictation as the user left it, or null if they didn't change the field.
+     * While the text around it is unchanged that's cut off, so only the dictated
+     * part is compared; otherwise it's the whole field.
+     */
+    fun edited(): String? {
+        if (latest == inserted.text) return null
+        val aroundIntact = latest.length >= before.length + after.length &&
+            latest.startsWith(before) && latest.endsWith(after)
+        return if (aroundIntact) latest.substring(before.length, latest.length - after.length).trim() else latest
+    }
 }

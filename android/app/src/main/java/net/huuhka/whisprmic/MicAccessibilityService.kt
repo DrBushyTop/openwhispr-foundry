@@ -34,6 +34,10 @@ import kotlin.math.hypot
  * to OpenWhispr and type the text it returns into that field. The ✕ beside the
  * button cancels a recording. Hold the button to pick it up and move it, or
  * drop it on "Hide in <app>" to hide it in that app.
+ *
+ * After a dictation goes in, the field is followed until it's sent, left or a
+ * minute passes. If the user corrected words in it, OpenWhispr adds them to its
+ * dictionary, as its desktop auto-learn does after a paste.
  */
 class MicAccessibilityService : AccessibilityService(), RecorderService.Listener {
     private val handler = Handler(Looper.getMainLooper())
@@ -64,6 +68,13 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     /** Bumped when a send is cancelled, so its late answer is ignored. */
     private var sendId = 0
     private var destroyed = false
+    /** The field of the last dictation and its text, while following how the user edits it. */
+    private var watchedField: AccessibilityNodeInfo? = null
+    private var watch: EditWatch? = null
+    private val endWatch = Runnable {
+        followEdits()
+        finishWatch()
+    }
     private var lastToast: Toast? = null
 
     override fun onServiceConnected() {
@@ -114,6 +125,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
 
     private fun update() {
         if (destroyed) return
+        followEdits()
         val keyboard = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
         if (keyboard != null) {
             val bounds = Rect().also(keyboard::getBoundsInScreen)
@@ -367,18 +379,11 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     private fun insert(text: String): Boolean {
         val node = target ?: return false
         target = null
+        // Learn from the last dictation before this one changes the field.
+        followEdits()
+        finishWatch()
         if (!node.refresh() || !node.isVisibleToUser || !node.isEditable) return false
-        val field = FieldText(
-            realFieldText(
-                node.text,
-                node.hintText,
-                node.isShowingHintText,
-                hasCursor = node.textSelectionStart >= 0 ||
-                    node.actionList.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION),
-            ),
-            node.textSelectionStart,
-            node.textSelectionEnd,
-        )
+        val field = FieldText(fieldText(node), node.textSelectionStart, node.textSelectionEnd)
         val insertion = insertDictation(field, text)
         val setText = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, insertion.text)
@@ -389,7 +394,54 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, insertion.cursor)
         }
         node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, cursor)
+        if (prefs.learnCorrections) {
+            watchedField = node
+            watch = EditWatch(text.trim(), insertion)
+            handler.postDelayed(endWatch, WATCH_MS)
+        }
         return true
+    }
+
+    /** The field's real text, without a placeholder it reports as text. */
+    private fun fieldText(node: AccessibilityNodeInfo): String = realFieldText(
+        node.text,
+        node.hintText,
+        node.isShowingHintText,
+        hasCursor = node.textSelectionStart >= 0 ||
+            node.actionList.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION),
+    )
+
+    // --- Learning from corrections ---
+
+    /** Reads the watched field's text, and ends the watch once it's sent, cleared or left. */
+    private fun followEdits() {
+        val node = watchedField ?: return
+        val left = !node.refresh() || !node.isFocused
+        if (left || watch?.update(fieldText(node)) == false) finishWatch()
+    }
+
+    /** Sends the user's corrections, if any, and shows the words OpenWhispr learned from them. */
+    private fun finishWatch() {
+        handler.removeCallbacks(endWatch)
+        val done = watch ?: return
+        watch = null
+        watchedField = null
+        val edited = done.edited() ?: return
+        if (!prefs.isConfigured) return
+        val client = DictationClient(prefs.serverUrl, prefs.token)
+        worker.execute {
+            // Learning is a bonus, so a failure only goes to the log.
+            val learned = runCatching { client.learn(done.original, edited) }
+                .onFailure { Log.w(TAG, "Couldn't send corrections", it) }
+                .getOrNull().orEmpty()
+            if (learned.isNotEmpty()) {
+                handler.post {
+                    if (destroyed) return@post
+                    toast("Added ${LearnedWords.quote(learned)} to the dictionary")
+                    LearnedWords.notify(this, learned)
+                }
+            }
+        }
     }
 
     // --- Helpers ---
@@ -606,5 +658,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         private const val WAV_HEADER_BYTES = 44L
         private const val MAX_NODES_SEARCHED = 400
         private const val RETRY_KEEP_MS = 10 * 60 * 1000L
+        /** How long after a dictation its corrections count, if it isn't sent or left before. */
+        private const val WATCH_MS = 60 * 1000L
     }
 }

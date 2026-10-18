@@ -123,6 +123,10 @@ class SettingsActivity : Activity() {
             },
         )
 
+        column.addView(heading("Dictionary"))
+        column.addView(hint("OpenWhispr's word list, and learning from your corrections."))
+        column.addView(button("Edit the dictionary") { startActivity(Intent(this, DictionaryActivity::class.java)) })
+
         column.addView(heading("How to use it"))
         column.addView(
             hint(

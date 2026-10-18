@@ -36,6 +36,15 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".DictionaryActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <receiver
+            android:name=".LearnedWords$UndoReceiver"
+            android:exported="false" />
+
         <service
             android:name=".RecorderService"
             android:exported="false"

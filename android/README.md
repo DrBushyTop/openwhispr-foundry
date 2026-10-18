@@ -2,7 +2,7 @@
 
 An Android app that adds a floating mic button above the keyboard. Tap it, talk, tap again, and the text appears in the field you were typing in. You keep using your normal keyboard (Gboard or any other).
 
-The recording goes to OpenWhispr Patched on your Mac over Tailscale, which runs it through the same pipeline as a hotkey dictation: your speech-to-text model, cleanup prompt, dictionary and snippets. The phone has no settings of its own for any of that. Change them in OpenWhispr on the Mac.
+The recording goes to OpenWhispr Patched on your Mac over Tailscale, which runs it through the same pipeline as a hotkey dictation: your speech-to-text model, cleanup prompt, dictionary and snippets. The phone has no settings of its own for any of that. Change them in OpenWhispr on the Mac. The dictionary is the exception: you can also edit it from the phone, and the app adds words you correct, so you don't need to open the Mac for it.
 
 ## What you need
 
@@ -58,11 +58,26 @@ Tap into any text field. The mic appears above the keyboard, on the right.
 
 The first time the button appears, a short tip explains tap and hold.
 
+### Learning from your corrections
+
+Like OpenWhispr's auto-learn on the desktop, the app notices when you fix a misheard word. After a dictation goes in, it follows that field until you send the message, leave the field, or a minute passes. If you changed words, it sends the dictation and your edited version to OpenWhispr, which picks out the corrected words and adds them to the dictionary, marked as learned. Future dictations on the phone and the Mac then listen for them.
+
+A toast and a notification say which words were added. **Undo** in the notification removes them again. Only the latest notification is kept; remove older words in the dictionary screen.
+
+OpenWhispr uses the same rules as on the desktop: only one-for-one word swaps that sound alike count, not rewrites, short or common words, or words already in the dictionary. The phone also skips changed endings, like "meeting" to "meetings", which are usually grammar or a Gboard suggestion rather than a misheard word.
+
+Turn it off with **Learn from my corrections** in the dictionary screen. OpenWhispr's own auto-learn setting on the Mac also applies; the dictionary screen says if that one is off.
+
+### The dictionary
+
+Settings → **Edit the dictionary** lists OpenWhispr's dictionary, newest first, with learned words marked. Type in the field at the top to find a word; tap **Add** to add what you typed. Tap a word to fix its spelling or delete it. Changes are saved straight to OpenWhispr on the Mac, and apply to the next dictation.
+
 ## Settings
 
 - **Where the mic shows.** "In every app" is the default; **Choose apps to hide it in** opens a searchable list of your apps. "Only in apps I choose" flips it around, so the mic shows in the apps you tick and nowhere else. Each mode keeps its own list. The mic never shows in password fields or in Whispr Mic itself.
 - **Lock it in place.** Holding the button no longer picks it up.
 - **Move it back to the default spot.** Puts the button back on the right, just above the keyboard.
+- **Edit the dictionary.** See [The dictionary](#the-dictionary).
 
 ## Troubleshooting
 
@@ -78,6 +93,8 @@ The first time the button appears, a short tip explains tap and hold.
 
 **"The recording was silent."** Android gave the app silence instead of audio, usually because another app holds the microphone.
 
+**"OpenWhispr Patched on the Mac needs updating for this"** in the dictionary screen. The Mac app was built before the dictionary endpoints. Rebuild it with the current `mobile-dictation.patch`.
+
 **No mic button.** Check that the accessibility service is still on; Android turns it off when the app is force-stopped or updated through some installers. Also check that the app isn't hidden under Where the mic shows.
 
 ## How it works
@@ -86,6 +103,7 @@ The first time the button appears, a short tip explains tap and hold.
 - Android only lets a background app record from a microphone-type foreground service, so a tap starts `RecorderService`. It records 16 kHz mono WAV with `AudioRecord` and shows a "Listening" notification while it does.
 - `DictationClient` posts the WAV to `/v1/dictate` with the token and waits for the text (up to two minutes).
 - The text is inserted with `ACTION_SET_TEXT`, computed from the field's current text and cursor so it lands at the cursor with sensible spacing (`TextInsertion.kt`). Some apps, Telegram and WhatsApp among them, report their "Message" placeholder as the text of an empty field; a field that reports no cursor counts as empty, so the placeholder isn't kept. The last recording stays in the app's cache, so a failed send can be retried.
+- After inserting, the service keeps the field and reads its text on each text-change event (`EditWatch` in `TextInsertion.kt`). An empty field means the message was sent, so the text from just before that counts. When the watch ends, `DictationClient` posts the dictation and the edited text to `/v1/learn`. While the text around the dictation is unchanged, only the dictated part is sent.
 
 The server side is in [openwhispr-patch/README.md](../openwhispr-patch/README.md#phone-dictation).
 
@@ -93,11 +111,13 @@ The server side is in [openwhispr-patch/README.md](../openwhispr-patch/README.md
 
 | File | What it does |
 | --- | --- |
-| `MicAccessibilityService.kt` | finds the focused field, shows and moves the button, runs a dictation |
+| `MicAccessibilityService.kt` | finds the focused field, shows and moves the button, runs a dictation, follows corrections |
 | `MicButton.kt` | the button, the ✕ next to it, and the "Hide in" bar |
 | `RecorderService.kt`, `WavRecorder.kt` | records the microphone to a WAV file |
 | `DictationClient.kt` | talks to OpenWhispr |
-| `TextInsertion.kt` | works out the field's new text and cursor |
+| `TextInsertion.kt` | works out the field's new text and cursor, and what the user changed afterwards |
+| `LearnedWords.kt` | the "Added to the dictionary" notification and its Undo |
+| `DictionaryActivity.kt` | the dictionary screen |
 | `SettingsActivity.kt`, `AppPickerActivity.kt` | the settings screen and the app list |
 | `Prefs.kt` | stored settings |
 

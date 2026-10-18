@@ -1,5 +1,5 @@
 diff --git a/main.js b/main.js
-index 2ac395883..f757625e2 100644
+index 2ac395883..b15160b13 100644
 --- a/main.js
 +++ b/main.js
 @@ -280,6 +280,7 @@ const dockManager = require("./src/helpers/dockManager");
@@ -18,11 +18,14 @@ index 2ac395883..f757625e2 100644
  let globeKeyAlertShown = false;
  let macAccessibilityFeaturesReady = false;
  let startMacAccessibilityFeatures = null;
-@@ -1010,6 +1012,12 @@ async function startApp() {
+@@ -1010,6 +1012,15 @@ async function startApp() {
      cliBridge = null;
    });
  
-+  mobileDictation = new MobileDictationServer(windowManager);
++  mobileDictation = new MobileDictationServer(windowManager, {
++    databaseManager,
++    isAutoLearnEnabled: () => ipcHandlers?._autoLearnEnabled !== false,
++  });
 +  mobileDictation.start().catch((err) => {
 +    debugLogger.error("Mobile dictation failed to start", { error: err.message });
 +    mobileDictation = null;
@@ -31,7 +34,7 @@ index 2ac395883..f757625e2 100644
    await migrateCookieToBearerToken();
  
    applyOpenWhisprOriginHeader(session.defaultSession);
-@@ -1988,6 +1996,10 @@ function performSyncTeardown() {
+@@ -1988,6 +1999,10 @@ function performSyncTeardown() {
      cliBridge.stop().catch(() => {});
      cliBridge = null;
    }
@@ -95,18 +98,22 @@ index cdf8bbae9..70cd31349 100644
            screenContext
 diff --git a/src/helpers/mobileDictation.js b/src/helpers/mobileDictation.js
 new file mode 100644
-index 000000000..666dd8bb8
+index 000000000..335cf0662
 --- /dev/null
 +++ b/src/helpers/mobileDictation.js
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,295 @@
 +// Dictation for a phone: audio comes in over HTTP, goes through the same
 +// transcription and cleanup pipeline as a hotkey dictation, and the text goes
 +// back in the response instead of being pasted.
 +//
 +// Off unless ~/.openwhispr/mobile-dictation.json exists with {port, token}.
 +// Listens on 127.0.0.1 only; reach it from the phone through `tailscale serve`.
-+// Requests run one at a time in the dictation panel's renderer, which owns the
++// Dictations run one at a time in the dictation panel's renderer, which owns the
 +// settings, prompts and dictionary (see useMobileDictation.js).
++//
++// The phone can also read and edit the dictionary, and send back how the user
++// edited a dictation so the corrected words are learned, as auto-learn does
++// for desktop pastes. Those go straight to the database, like the CLI bridge.
 +const http = require("http");
 +const fs = require("fs");
 +const os = require("os");
@@ -114,9 +121,13 @@ index 000000000..666dd8bb8
 +const crypto = require("crypto");
 +const { ipcMain } = require("electron");
 +const debugLogger = require("./debugLogger");
++const { broadcastToWindows } = require("./windowBroadcast");
++const { extractCorrections } = require("../utils/correctionLearner");
 +
 +const HOST = "127.0.0.1";
 +const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
++const MAX_JSON_BYTES = 256 * 1024;
++const MAX_WORD_LENGTH = 100;
 +const RENDERER_TIMEOUT_MS = 120 * 1000;
 +
 +function getConfigPath() {
@@ -148,17 +159,17 @@ index 000000000..666dd8bb8
 +  res.end(json);
 +}
 +
-+function readAudioBody(req) {
++function readBody(req, maxBytes, tooLarge) {
 +  return new Promise((resolve, reject) => {
 +    const declared = Number(req.headers["content-length"]);
-+    if (declared > MAX_AUDIO_BYTES) return reject(httpError(413, "Audio is too large"));
++    if (declared > maxBytes) return reject(httpError(413, tooLarge));
 +    const chunks = [];
 +    let size = 0;
 +    req.on("data", (chunk) => {
 +      size += chunk.length;
-+      if (size > MAX_AUDIO_BYTES) {
++      if (size > maxBytes) {
 +        req.destroy();
-+        reject(httpError(413, "Audio is too large"));
++        reject(httpError(413, tooLarge));
 +        return;
 +      }
 +      chunks.push(chunk);
@@ -168,6 +179,43 @@ index 000000000..666dd8bb8
 +  });
 +}
 +
++async function readJsonBody(req) {
++  const body = await readBody(req, MAX_JSON_BYTES, "Request is too large");
++  try {
++    const json = JSON.parse(body.toString("utf8"));
++    if (json && typeof json === "object" && !Array.isArray(json)) return json;
++  } catch {
++    // Answered below.
++  }
++  throw httpError(400, "Send a JSON object");
++}
++
++function wordList(value, name) {
++  if (value === undefined) return [];
++  if (!Array.isArray(value)) throw httpError(400, `${name} must be a list of words`);
++  return value.map((word) => {
++    if (typeof word !== "string" || !word.trim() || word.length > MAX_WORD_LENGTH) {
++      throw httpError(400, `${name} has an empty or overlong word`);
++    }
++    return word.trim();
++  });
++}
++
++// Desktop auto-learn takes "meeting" -> "meetings" as a new word. Fixing an
++// ending is usually grammar, and Gboard suggests endings a lot, so skip a word
++// that is a word of the dictation with up to three letters more or less.
++function changesOnlyTheEnding(word, originalText) {
++  const lower = word.toLowerCase();
++  return originalText
++    .toLowerCase()
++    .split(/[^\p{L}\p{N}_]+/u)
++    .some((original) => {
++      if (original.length < 3 || original === lower) return false;
++      const [short, long] = original.length < lower.length ? [original, lower] : [lower, original];
++      return long.startsWith(short) && long.length - short.length <= 3;
++    });
++}
++
 +function httpError(status, message) {
 +  const err = new Error(message);
 +  err.status = status;
@@ -175,8 +223,11 @@ index 000000000..666dd8bb8
 +}
 +
 +class MobileDictationServer {
-+  constructor(windowManager) {
++  // isAutoLearnEnabled reads OpenWhispr's "auto-learn corrections" setting.
++  constructor(windowManager, { databaseManager, isAutoLearnEnabled }) {
 +    this.windowManager = windowManager;
++    this.db = databaseManager;
++    this.isAutoLearnEnabled = isAutoLearnEnabled;
 +    this.server = null;
 +    this.token = null;
 +    this.pending = new Map();
@@ -245,7 +296,7 @@ index 000000000..666dd8bb8
 +        .split(";")[0]
 +        .trim();
 +      if (!mimeType.startsWith("audio/")) throw httpError(415, "Send audio/wav or audio/mp4");
-+      const audio = await readAudioBody(req);
++      const audio = await readBody(req, MAX_AUDIO_BYTES, "Audio is too large");
 +      if (!audio.length) throw httpError(400, "No audio");
 +      const started = Date.now();
 +      const result = await this._enqueue("dictate", { audio, mimeType });
@@ -258,7 +309,68 @@ index 000000000..666dd8bb8
 +      sendJson(res, 200, result);
 +      return;
 +    }
++    if (req.method === "GET" && pathname === "/v1/dictionary") {
++      sendJson(res, 200, this._dictionary());
++      return;
++    }
++    // A delta, like the CLI bridge's: { add: [...], remove: [...] }. An edit is
++    // both, in one request. Words added here count as typed by hand.
++    if (req.method === "POST" && pathname === "/v1/dictionary") {
++      const body = await readJsonBody(req);
++      const add = wordList(body.add, "add");
++      const remove = wordList(body.remove, "remove");
++      if (add.length === 0 && remove.length === 0) throw httpError(400, "Nothing to add or remove");
++      this._changeDictionary({ add, remove }, "manual");
++      sendJson(res, 200, this._dictionary());
++      return;
++    }
++    // { original, edited }: the dictated text, and the field's text after the
++    // user's edits. Answers with the words it added, which the phone can undo
++    // by removing them.
++    if (req.method === "POST" && pathname === "/v1/learn") {
++      const body = await readJsonBody(req);
++      if (typeof body.original !== "string" || typeof body.edited !== "string") {
++        throw httpError(400, "Send original and edited text");
++      }
++      if (!this.isAutoLearnEnabled()) {
++        sendJson(res, 200, { words: [], autoLearn: false });
++        return;
++      }
++      const words = extractCorrections(body.original, body.edited, this.db.getDictionary()).filter(
++        (word) => word.length <= MAX_WORD_LENGTH && !changesOnlyTheEnding(word, body.original)
++      );
++      if (words.length) {
++        this._changeDictionary({ add: words }, "learned");
++        debugLogger.info("Mobile dictation learned words", { count: words.length }, "mobile");
++      }
++      sendJson(res, 200, { words, autoLearn: true });
++      return;
++    }
 +    throw httpError(404, "Not found");
++  }
++
++  // Oldest first, as OpenWhispr lists them, marking the ones auto-learn added.
++  _dictionary() {
++    let rows;
++    try {
++      rows = this.db.db
++        .prepare("SELECT word, source FROM custom_dictionary WHERE deleted_at IS NULL ORDER BY id ASC")
++        .all();
++    } catch {
++      // Without the source column, list the words without the marks.
++      rows = this.db.getDictionary().map((word) => ({ word, source: "manual" }));
++    }
++    return {
++      words: rows.map((row) => ({ word: row.word, learned: row.source === "learned" })),
++      autoLearn: this.isAutoLearnEnabled(),
++    };
++  }
++
++  _changeDictionary(changes, source) {
++    const result = this.db.applyDictionaryChanges(changes, source);
++    if (result?.success === false) throw new Error(result.error || "Couldn't save the dictionary");
++    // The renderers hold the copy dictations read, so tell them.
++    broadcastToWindows("dictionary-updated", this.db.getDictionary());
 +  }
 +
 +  _enqueue(kind, payload = {}) {

@@ -68,6 +68,11 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean(HINT_SHOWN, false)
         set(value) = prefs.edit().putBoolean(HINT_SHOWN, value).apply()
 
+    /** Whether corrections to a dictation are sent to OpenWhispr to learn from. */
+    var learnCorrections: Boolean
+        get() = prefs.getBoolean(LEARN_CORRECTIONS, true)
+        set(value) = prefs.edit().putBoolean(LEARN_CORRECTIONS, value).apply()
+
     val isConfigured: Boolean
         get() = serverUrl.isNotEmpty() && token.isNotEmpty()
 
@@ -81,6 +86,7 @@ class Prefs(context: Context) {
         private const val BUTTON_ABOVE_KEYBOARD = "buttonAboveKeyboardPx"
         private const val BUTTON_LOCKED = "buttonLocked"
         private const val HINT_SHOWN = "hintShown"
+        private const val LEARN_CORRECTIONS = "learnCorrections"
 
         /** A starting point for "only these apps": T3 Code's production, preview and development builds. */
         val DEFAULT_SHOWN_APPS = setOf(
