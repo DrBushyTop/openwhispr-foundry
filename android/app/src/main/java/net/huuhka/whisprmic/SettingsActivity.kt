@@ -57,7 +57,7 @@ class SettingsActivity : Activity() {
         prefs = Prefs(this)
 
         dictionaryPage = DictionaryPage(this, prefs, worker)
-        appsPage = AppsPage(this, prefs, worker)
+        appsPage = AppsPage(this, prefs, worker) { refreshStatus() }
         setupPage = setupPage()
         val pages = FrameLayout(this).apply {
             addView(dictionaryPage)
@@ -84,7 +84,12 @@ class SettingsActivity : Activity() {
         )
         val saved = savedInstanceState?.getString(EXTRA_TAB)
         // onResume loads the dictionary next.
-        show(tabFrom(saved) ?: tabFrom(intent.getStringExtra(EXTRA_TAB)) ?: if (setupComplete()) Tab.DICTIONARY else Tab.SETUP, load = false)
+        val opening = when {
+            !setupComplete() -> Tab.SETUP
+            !prefs.hasApps -> Tab.APPS
+            else -> Tab.DICTIONARY
+        }
+        show(tabFrom(saved) ?: tabFrom(intent.getStringExtra(EXTRA_TAB)) ?: opening, load = false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -254,12 +259,18 @@ class SettingsActivity : Activity() {
             (if (notifications) "✓" else "✗") + " Notifications allowed (needed to see errors)",
             (if (accessibility) "✓" else "✗") + " Mic button turned on in Accessibility",
             (if (prefs.isConfigured) "✓" else "✗") + " Server and token set",
+            (if (prefs.hasApps) "✓" else "✗") + " Apps chosen for the mic, in the Apps tab",
         ).joinToString("\n")
-        // A dot on the tab while something is missing, so it's found from the other tabs.
-        tabLabels.getValue(Tab.SETUP).text = if (setupComplete()) {
-            Tab.SETUP.label
+        markTab(Tab.SETUP, !setupComplete())
+        markTab(Tab.APPS, !prefs.hasApps)
+    }
+
+    /** A dot on the tab while something there is missing, so it's found from the other tabs. */
+    private fun markTab(t: Tab, missing: Boolean) {
+        tabLabels.getValue(t).text = if (!missing) {
+            t.label
         } else {
-            SpannableString("${Tab.SETUP.label} ●").apply {
+            SpannableString("${t.label} ●").apply {
                 setSpan(ForegroundColorSpan(0xFFE5484D.toInt()), length - 1, length, 0)
             }
         }

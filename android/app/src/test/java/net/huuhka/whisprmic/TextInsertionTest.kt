@@ -3,6 +3,7 @@ package net.huuhka.whisprmic
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -69,10 +70,10 @@ class TextInsertionTest {
     }
 
     @Test
-    fun editWatchSendsTheWholeFieldWhenTheTextAroundChanged() {
+    fun editWatchSendsNothingWhenTheTextAroundChanged() {
         val watch = EditWatch("two", insertDictation(FieldText("one three", 4, 4), "two"))
         assertTrue(watch.update("uno too three"))
-        assertEquals("uno too three", watch.edited())
+        assertNull(watch.edited())
     }
 
     @Test

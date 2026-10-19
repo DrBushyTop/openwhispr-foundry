@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Whispr Mic</string>
-    <string name="accessibility_description">Shows a microphone button above the keyboard when you type, in every app or only the ones you choose. Your speech is sent to your own OpenWhispr computer, and the text it returns is typed into the field you were in. Whispr Mic reads which app and text field is focused, and that field\'s text, only to place the button, insert the text and notice words you correct in it right after.</string>
+    <string name="accessibility_description">Shows a microphone button above the keyboard when you type, in the apps you choose. Your speech is sent to your own OpenWhispr computer, and the text it returns is typed into the field you were in. Whispr Mic reads which app and text field is focused, and that field\'s text, only to place the button, insert the text and notice words you correct in it right after.</string>
 </resources>

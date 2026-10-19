@@ -74,7 +74,10 @@ class RecorderService : Service() {
         recorder = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        if (!deliver) return
+        if (!deliver) {
+            recordingFile(this).delete()
+            return
+        }
         // Without a recording (the service was restarted meanwhile), say so rather than leave the button waiting.
         if (recording != null) listener?.onRecorded(recording) else listener?.onRecordingFailed("Nothing was recorded")
     }
@@ -106,7 +109,7 @@ class RecorderService : Service() {
 
         var listener: Listener? = null
 
-        /** The latest recording, kept so it can be sent again if sending fails. */
+        /** The latest recording, kept only until it's sent or given up on, so it can be sent again. */
         fun recordingFile(context: Context) = File(context.cacheDir, "last-dictation.wav")
     }
 }

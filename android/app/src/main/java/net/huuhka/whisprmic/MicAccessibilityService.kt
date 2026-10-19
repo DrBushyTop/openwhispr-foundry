@@ -35,6 +35,10 @@ import kotlin.math.hypot
  * button cancels a recording. Hold the button to pick it up and move it, or
  * drop it on "Hide in <app>" to hide it in that app.
  *
+ * The server's answer is untrusted text. It only ever goes into the field the
+ * dictation started in, and only if that field is still focused, isn't a
+ * password field and is in an app the mic is allowed in.
+ *
  * After a dictation goes in, the field is followed until it's sent, left or a
  * minute passes. If the user corrected words in it, OpenWhispr adds them to its
  * dictionary, as its desktop auto-learn does after a paste.
@@ -107,6 +111,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         RecorderService.listener = null
         // Android can destroy the service before it ever connected.
         if (::buttonWindow.isInitialized) hide()
+        if (state != MicState.STARTING && state != MicState.RECORDING) deleteRecording()
         handler.removeCallbacksAndMessages(null)
         worker.shutdownNow()
         super.onDestroy()
@@ -298,6 +303,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     private fun startDictation() {
         if (!readyOrOpenSettings()) return
         val field = focusedField() ?: return toast("Tap into a text field first")
+        if (!mayTypeInto(field)) return toast("The mic can't type into this field")
         target = field
         setState(MicState.STARTING)
         try {
@@ -314,7 +320,9 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
             setState(MicState.IDLE)
             return toast("The recording is gone, so there's nothing to send")
         }
-        target = focusedField() ?: return toast("Tap into a text field first")
+        val field = focusedField() ?: return toast("Tap into a text field first")
+        if (!mayTypeInto(field)) return toast("The mic can't type into this field")
+        target = field
         send(file)
     }
 
@@ -357,17 +365,27 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     }
 
     private fun onResult(result: Result<DictationResult>) {
+        val node = target
+        target = null
         result.onFailure {
-            retryPackage = target?.packageName?.toString() ?: fieldPackage
-            retrySinceMs = System.currentTimeMillis()
-            setState(MicState.RETRY)
             val reason = it.message.orEmpty().trim().let { m -> if (m.endsWith('?') || m.endsWith('.')) m else "$m." }
-            return toast("Not sent: $reason Tap ↻ to retry.")
+            return keepForRetry(node, "Not sent: $reason Tap ↻ to retry.")
+        }
+        val dictation = result.getOrThrow()
+        if (dictation.text.isBlank()) {
+            setState(MicState.IDLE)
+            return toast("No speech heard")
+        }
+        // Learn from the last dictation before this one changes the field.
+        followEdits()
+        finishWatch()
+        // Checked again now: the user may have moved on while the server worked.
+        // The text then goes nowhere, not even the clipboard, but the recording is kept to send again.
+        if (node == null || !mayTypeInto(node)) {
+            return keepForRetry(node, "You left the text field, so nothing was typed. Tap ↻ to send it to the field you're in.")
         }
         setState(MicState.IDLE)
-        val dictation = result.getOrThrow()
-        if (dictation.text.isBlank()) return toast("No speech heard")
-        if (!insert(dictation.text)) {
+        if (!insert(node, dictation.text)) {
             copyToClipboard(dictation.text)
             toast("Couldn't type into the field. The text is on the clipboard.")
         } else if (dictation.cleanupFailed) {
@@ -375,14 +393,24 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         }
     }
 
-    /** Types the text at the cursor of the field the dictation started in. */
-    private fun insert(text: String): Boolean {
-        val node = target ?: return false
-        target = null
-        // Learn from the last dictation before this one changes the field.
-        followEdits()
-        finishWatch()
-        if (!node.refresh() || !node.isVisibleToUser || !node.isEditable) return false
+    private fun keepForRetry(node: AccessibilityNodeInfo?, message: String) {
+        retryPackage = node?.packageName?.toString() ?: fieldPackage
+        retrySinceMs = System.currentTimeMillis()
+        setState(MicState.RETRY)
+        toast(message)
+    }
+
+    /**
+     * Whether dictated text may go into [node]: it's the focused field, editable,
+     * not a password field, and in an app the mic is allowed in. Checked when a
+     * dictation starts or is sent again, and just before its text goes in.
+     */
+    private fun mayTypeInto(node: AccessibilityNodeInfo): Boolean =
+        node.refresh() && node.isVisibleToUser && node.isEditable && !node.isPassword &&
+            prefs.showsMicIn(node.packageName?.toString().orEmpty()) && focusedField() == node
+
+    /** Types the text at the cursor of [node], which [mayTypeInto] just allowed. */
+    private fun insert(node: AccessibilityNodeInfo, text: String): Boolean {
         val field = FieldText(fieldText(node), node.textSelectionStart, node.textSelectionEnd)
         val insertion = insertDictation(field, text)
         val setText = Bundle().apply {
@@ -485,12 +513,19 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     }
 
     private fun setState(newState: MicState) {
+        // Nothing will send the recording again, so it needn't stay on the phone.
+        // A cancelled one is deleted by RecorderService once it stops writing.
+        if (newState == MicState.IDLE && state != MicState.STARTING && state != MicState.RECORDING) deleteRecording()
         state = newState
         button.render(newState)
         // A screen lock mid-dictation leaves no field to type the text into.
         buttonWindow.keepScreenOn(newState == MicState.STARTING || newState == MicState.RECORDING || newState == MicState.WORKING)
         updateChip()
         if (newState == MicState.IDLE || newState == MicState.RETRY) scheduleUpdate()
+    }
+
+    private fun deleteRecording() {
+        RecorderService.recordingFile(this).delete()
     }
 
     private fun recorderCommand(action: String) {

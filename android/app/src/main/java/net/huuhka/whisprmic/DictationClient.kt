@@ -1,7 +1,9 @@
 package net.huuhka.whisprmic
 
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -20,6 +22,7 @@ data class Dictionary(val words: List<DictionaryWord>, val autoLearn: Boolean)
 /**
  * Talks to OpenWhispr Patched's mobile dictation endpoint (see
  * openwhispr-patch/mobile-dictation.patch). Blocking; call off the main thread.
+ * Answers are untrusted: their size is capped, and a dictation's text too.
  */
 class DictationClient(private val baseUrl: String, private val token: String) {
 
@@ -33,7 +36,9 @@ class DictationClient(private val baseUrl: String, private val token: String) {
             connection.outputStream.use { out -> wav.inputStream().use { it.copyTo(out) } }
         }
         val json = JSONObject(body)
-        return DictationResult(json.optString("text"), json.optBoolean("cleanupFailed"))
+        val text = json.optString("text")
+        if (text.length > MAX_DICTATION_CHARS) throw IOException("The server sent back far more text than a dictation has")
+        return DictationResult(text, json.optBoolean("cleanupFailed"))
     }
 
     /** OpenWhispr's settings summary, also a check that the URL and token work. */
@@ -90,7 +95,7 @@ class DictationClient(private val baseUrl: String, private val token: String) {
             send()
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val body = stream?.use(::readCapped).orEmpty()
             if (status == 401) throw IOException("The token was refused. Check it in Whispr Mic")
             // Builds before the dictionary endpoints answer those with 404.
             if (status == 404) throw IOException("OpenWhispr Patched on the Mac needs updating for this")
@@ -108,5 +113,24 @@ class DictationClient(private val baseUrl: String, private val token: String) {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun readCapped(stream: InputStream): String {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            out.write(buffer, 0, count)
+            if (out.size() > MAX_RESPONSE_BYTES) throw IOException("The server's answer was too large")
+        }
+        return out.toString(Charsets.UTF_8.name())
+    }
+
+    companion object {
+        /** Far above any real answer; even a long dictionary comes to a few KB. */
+        private const val MAX_RESPONSE_BYTES = 256 * 1024
+        /** A ten-minute recording, the longest there is, comes to some 10,000 characters. */
+        private const val MAX_DICTATION_CHARS = 30_000
     }
 }

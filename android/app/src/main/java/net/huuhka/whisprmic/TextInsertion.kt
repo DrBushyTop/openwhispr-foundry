@@ -58,14 +58,16 @@ class EditWatch(val original: String, private val inserted: Insertion) {
     }
 
     /**
-     * The dictation as the user left it, or null if they didn't change the field.
-     * While the text around it is unchanged that's cut off, so only the dictated
-     * part is compared; otherwise it's the whole field.
+     * The dictation as the user left it, or null if they didn't change it. Only
+     * the dictated part is ever returned: if the text around it changed too, the
+     * dictation can't be told apart from the rest, so this is null rather than
+     * the whole field, which may hold text that was never dictated.
      */
     fun edited(): String? {
         if (latest == inserted.text) return null
         val aroundIntact = latest.length >= before.length + after.length &&
             latest.startsWith(before) && latest.endsWith(after)
-        return if (aroundIntact) latest.substring(before.length, latest.length - after.length).trim() else latest
+        if (!aroundIntact) return null
+        return latest.substring(before.length, latest.length - after.length).trim()
     }
 }

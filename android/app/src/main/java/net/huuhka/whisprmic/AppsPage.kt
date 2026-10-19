@@ -28,11 +28,16 @@ fun appLabel(context: Context, packageName: String): String = runCatching {
 }.getOrDefault(packageName)
 
 /**
- * The Apps tab: every app or only chosen ones, and a searchable list of
+ * The Apps tab: only chosen apps or every app, and a searchable list of
  * installed apps with checkboxes. The ticked ones are the current filter's list.
+ * [onChange] runs when either changes.
  */
-class AppsPage(private val activity: Activity, private val prefs: Prefs, private val worker: ExecutorService) :
-    LinearLayout(activity) {
+class AppsPage(
+    private val activity: Activity,
+    private val prefs: Prefs,
+    private val worker: ExecutorService,
+    private val onChange: () -> Unit,
+) : LinearLayout(activity) {
     private class App(val packageName: String, val label: String)
 
     private val filter: RadioGroup
@@ -55,13 +60,13 @@ class AppsPage(private val activity: Activity, private val prefs: Prefs, private
             setPadding(pad, dp(8), pad, 0)
             addView(RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "In every app"
-                tag = AppFilter.ALL_EXCEPT_HIDDEN
+                text = "Only in apps I choose"
+                tag = AppFilter.ONLY_SHOWN
             })
             addView(RadioButton(context).apply {
                 id = View.generateViewId()
-                text = "Only in apps I choose"
-                tag = AppFilter.ONLY_SHOWN
+                text = "In every app"
+                tag = AppFilter.ALL_EXCEPT_HIDDEN
             })
         }
         addView(filter)
@@ -123,9 +128,11 @@ class AppsPage(private val activity: Activity, private val prefs: Prefs, private
         filter.setOnCheckedChangeListener { group, id ->
             prefs.appFilter = group.findViewById<RadioButton>(id).tag as AppFilter
             refresh()
+            onChange()
         }
         explanation.text = if (current == AppFilter.ONLY_SHOWN) {
-            "The mic shows only in the apps you tick. It never shows in password fields."
+            "The mic shows only in the apps you tick, so it can't type into anything else. " +
+                "It never shows in password fields."
         } else {
             "The mic shows in every app except the ones you tick. It never shows in password fields."
         }
@@ -141,6 +148,7 @@ class AppsPage(private val activity: Activity, private val prefs: Prefs, private
         if (!selected.remove(app.packageName)) selected += app.packageName
         prefs.filterApps = selected.toSet()
         adapter.notifyDataSetChanged()
+        onChange()
     }
 
     private fun render() {

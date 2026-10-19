@@ -2,7 +2,10 @@ package net.huuhka.whisprmic
 
 import android.content.Context
 
-/** Which apps get the mic: every app minus [Prefs.hiddenApps], or only [Prefs.shownApps]. */
+/**
+ * Which apps get the mic: only [Prefs.shownApps] (the default, so a new install
+ * types into nothing until apps are chosen), or every app minus [Prefs.hiddenApps].
+ */
 enum class AppFilter { ALL_EXCEPT_HIDDEN, ONLY_SHOWN }
 
 /** Everything the app stores. The token sits in app-private storage, which isn't backed up. */
@@ -19,7 +22,7 @@ class Prefs(context: Context) {
         set(value) = prefs.edit().putString(TOKEN, value.trim()).apply()
 
     var appFilter: AppFilter
-        get() = if (prefs.getString(APP_FILTER, null) == AppFilter.ONLY_SHOWN.name) AppFilter.ONLY_SHOWN else AppFilter.ALL_EXCEPT_HIDDEN
+        get() = if (prefs.getString(APP_FILTER, null) == AppFilter.ALL_EXCEPT_HIDDEN.name) AppFilter.ALL_EXCEPT_HIDDEN else AppFilter.ONLY_SHOWN
         set(value) = prefs.edit().putString(APP_FILTER, value.name).apply()
 
     var hiddenApps: Set<String>
@@ -28,7 +31,7 @@ class Prefs(context: Context) {
 
     /** Both lists are kept, so switching between the two filters doesn't lose either. */
     var shownApps: Set<String>
-        get() = prefs.getStringSet(SHOWN_APPS, null) ?: DEFAULT_SHOWN_APPS
+        get() = prefs.getStringSet(SHOWN_APPS, null).orEmpty()
         set(value) = prefs.edit().putStringSet(SHOWN_APPS, value).apply()
 
     /** The list the current filter uses. */
@@ -43,6 +46,10 @@ class Prefs(context: Context) {
         appFilter == AppFilter.ONLY_SHOWN -> packageName in shownApps
         else -> packageName !in hiddenApps
     }
+
+    /** False while the mic is limited to chosen apps and none are chosen yet. */
+    val hasApps: Boolean
+        get() = appFilter == AppFilter.ALL_EXCEPT_HIDDEN || shownApps.isNotEmpty()
 
     fun hideMicIn(packageName: String) {
         if (appFilter == AppFilter.ONLY_SHOWN) shownApps = shownApps - packageName else hiddenApps = hiddenApps + packageName
@@ -87,12 +94,5 @@ class Prefs(context: Context) {
         private const val BUTTON_LOCKED = "buttonLocked"
         private const val HINT_SHOWN = "hintShown"
         private const val LEARN_CORRECTIONS = "learnCorrections"
-
-        /** A starting point for "only these apps": T3 Code's production, preview and development builds. */
-        val DEFAULT_SHOWN_APPS = setOf(
-            "com.t3tools.t3code",
-            "com.t3tools.t3code.preview",
-            "com.t3tools.t3code.dev",
-        )
     }
 }
