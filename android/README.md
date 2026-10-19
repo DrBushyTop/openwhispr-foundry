@@ -38,11 +38,24 @@ The APK is at `app/build/outputs/apk/debug/app-debug.apk`. Install it either way
 - **adb** (simplest): turn on wireless debugging on the phone, `adb pair` and `adb connect` once, then `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
 - **The file**: copy the APK to the phone and open it. Android asks you to allow installs from that app. Android then blocks the accessibility permission for apps installed this way. The fix is in step 2 below.
 
+### A release for Google Play
+
+Some banking apps refuse to open while an accessibility app that didn't come from Google Play is installed. Installing Whispr Mic through a Play internal testing track avoids that.
+
+Play takes an app bundle signed with an upload key. Make the key once on the machine that builds, as described at the top of `release.sh`; it lives in `~/.whispr-mic/`, outside the repo. Then, with everything committed:
+
+```sh
+android/release.sh        # build here
+android/release.sh m1     # or build on another Mac over SSH
+```
+
+It runs the tests and puts `whispr-mic-<versionCode>.aab` in `android/build/release/`, ready to upload in Play Console. The versionCode is the commit count, so each release from a newer commit is accepted. Play re-signs the app with its own key, so switching from a sideloaded build means uninstalling it once.
+
 ## Set up the phone
 
 Open **Whispr Mic**. It opens on the **Setup** tab until everything is in place; the tab has a red dot while something is missing, and its Status list shows what.
 
-1. **Allow microphone and notifications.** Notifications are needed to see error messages, because Android hides messages from background apps without them.
+1. **Allow microphone and notifications.** The app first shows what it reads and sends, and asks you to agree; it does the same before step 2. Notifications are needed to see error messages, because Android hides messages from background apps without them.
 2. **Turn on the mic button in Accessibility.** This opens Android's accessibility settings. Find Whispr Mic and turn it on. If the switch is greyed out and says "Restricted setting", go to Settings → Apps → Whispr Mic, open the ⋮ menu, choose **Allow restricted settings**, and try again.
 3. **Server URL and token.** Enter the URL and token that `enable-mobile-dictation.sh` printed, then tap **Save and test connection**. It should say "Connected to OpenWhispr" and show which models and prompt OpenWhispr uses.
 4. **Choose the apps.** The mic only shows in the apps you tick in the **Apps** tab, and none are ticked at first. That tab has a red dot until you tick one.

@@ -2,6 +2,7 @@ package net.huuhka.whisprmic
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -163,13 +164,15 @@ class SettingsActivity : Activity() {
         status = TextView(this).apply { textSize = 15f }
         column.addView(status)
         microphoneButton = button("Allow microphone and notifications") {
-            val wanted = listOf(Manifest.permission.RECORD_AUDIO) +
-                if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
-            requestPermissions(wanted.toTypedArray(), 1)
+            disclose {
+                val wanted = listOf(Manifest.permission.RECORD_AUDIO) +
+                    if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
+                requestPermissions(wanted.toTypedArray(), 1)
+            }
         }
         column.addView(microphoneButton)
         accessibilityButton = button("Turn on the mic button in Accessibility") {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            disclose { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
         column.addView(accessibilityButton)
 
@@ -237,6 +240,20 @@ class SettingsActivity : Activity() {
     override fun onDestroy() {
         worker.shutdownNow()
         super.onDestroy()
+    }
+
+    /**
+     * What the app reads and sends, shown right before each permission request, as
+     * Google Play requires. Only "Agree" goes on; back, tapping outside or
+     * "Not now" leave the permission alone.
+     */
+    private fun disclose(onAgree: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.disclosure_title)
+            .setMessage(R.string.disclosure)
+            .setPositiveButton("Agree") { _, _ -> onAgree() }
+            .setNegativeButton("Not now", null)
+            .show()
     }
 
     private fun microphoneAllowed() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

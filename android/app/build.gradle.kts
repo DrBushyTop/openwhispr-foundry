@@ -1,7 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// The upload key for Play stays outside the repo. release.sh explains the file.
+val signingFile = file(
+    System.getenv("WHISPR_MIC_SIGNING")
+        ?: "${System.getProperty("user.home")}/.whispr-mic/upload.properties",
+)
 
 android {
     namespace = "net.huuhka.whisprmic"
@@ -11,8 +19,27 @@ android {
         applicationId = "net.huuhka.whisprmic"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
+        // Play needs a higher versionCode for every upload; release.sh passes the commit count.
+        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
         versionName = "0.1.0"
+    }
+
+    signingConfigs {
+        if (signingFile.exists()) {
+            create("release") {
+                val signing = Properties().apply { signingFile.inputStream().use(::load) }
+                storeFile = signingFile.resolveSibling(signing.getProperty("storeFile"))
+                storePassword = signing.getProperty("storePassword")
+                keyAlias = signing.getProperty("keyAlias")
+                keyPassword = signing.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
 
     compileOptions {

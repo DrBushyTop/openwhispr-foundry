@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Whispr Mic</string>
+    <string name="disclosure_title">How Whispr Mic uses your data</string>
+    <string name="disclosure">Whispr Mic uses Android\'s accessibility service to show a mic button when you type in the apps you choose, and to type what you dictate into the text field.\n\nWhile it\'s on, it reads which app and text field you\'re in and the text in that field. It does this only in the apps you choose, never in password fields, and only to place the button, insert the text and notice words you correct right after a dictation. It doesn\'t use the service to read anything else on screen or to control your phone.\n\nWhen you dictate, it records your voice and sends the recording to the OpenWhispr server you set up. The dictated text and your corrections to it go there too, so it learns your words. That server may pass them on to the speech and text services it\'s set up to use.\n\nWhispr Mic sends nothing to its developer or anyone else. A recording stays on the phone only until it\'s sent or discarded.</string>
     <string name="accessibility_description">Shows a microphone button above the keyboard when you type, in the apps you choose. Your speech is sent to your own OpenWhispr computer, and the text it returns is typed into the field you were in. Whispr Mic reads which app and text field is focused, and that field\'s text, only to place the button, insert the text and notice words you correct in it right after.</string>
 </resources>
