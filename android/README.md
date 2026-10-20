@@ -99,6 +99,8 @@ The app has three tabs. The two you come back to are first; the one you set once
 
 ## Troubleshooting
 
+When a dictation isn't sent, a short message shows over the screen, and a **Dictation not sent** notification has the whole of it.
+
 **"Can't find host. Is Tailscale on?" or "Can't connect".** Tailscale is off on the phone, or the Mac is asleep or offline. With a Tailscale Service, the Mac may also not be approved as its host yet; see the Service setup. Check with the `curl` that `enable-mobile-dictation.sh` printed, from another device on the tailnet.
 
 **"The token was refused".** The token in the app doesn't match `~/.openwhispr/mobile-dictation.json` on the Mac. Run `enable-mobile-dictation.sh` again to print it.
@@ -138,6 +140,7 @@ The server side is in [openwhispr-patch/README.md](../openwhispr-patch/README.md
 | `DictationClient.kt` | talks to OpenWhispr |
 | `TextInsertion.kt` | works out the field's new text and cursor, and what the user changed afterwards |
 | `LearnedWords.kt` | the "Added to the dictionary" notification and its Undo |
+| `FailureNotification.kt` | the "Dictation not sent" notification with the whole error |
 | `SettingsActivity.kt` | the settings, its tabs and the Setup tab |
 | `DictionaryPage.kt`, `AppsPage.kt` | the Dictionary and Apps tabs |
 | `Prefs.kt` | stored settings |

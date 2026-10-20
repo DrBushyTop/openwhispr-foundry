@@ -20,6 +20,20 @@ data class DictionaryWord(val word: String, val learned: Boolean)
 data class Dictionary(val words: List<DictionaryWord>, val autoLearn: Boolean)
 
 /**
+ * OpenWhispr passes a transcription service's error on as it came, like
+ * `API Error: 502 {"error": "transcription failed: Azure didn't answer"}`.
+ * This keeps the message inside the JSON, so it fits in a toast.
+ */
+internal fun readableError(error: String): String {
+    val start = error.indexOf('{')
+    val json = if (start < 0) null else runCatching { JSONObject(error.substring(start)) }.getOrNull()
+    val inner = json?.optJSONObject("error")?.optString("message")
+        ?: json?.optString("error")?.ifEmpty { null }
+        ?: json?.optString("message")
+    return inner?.trim()?.ifEmpty { null } ?: error.trim()
+}
+
+/**
  * Talks to OpenWhispr Patched's mobile dictation endpoint (see
  * openwhispr-patch/mobile-dictation.patch). Blocking; call off the main thread.
  * Answers are untrusted: their size is capped, and a dictation's text too.
@@ -101,7 +115,7 @@ class DictationClient(private val baseUrl: String, private val token: String) {
             if (status == 404) throw IOException("OpenWhispr Patched on the Mac needs updating for this")
             if (status !in 200..299) {
                 val message = runCatching { JSONObject(body).getString("error") }.getOrNull()
-                throw IOException(message ?: "Server answered $status")
+                throw IOException(message?.let(::readableError) ?: "Server answered $status")
             }
             return body
         } catch (e: UnknownHostException) {

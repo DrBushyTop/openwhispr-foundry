@@ -371,8 +371,10 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
         target = null
         result.onFailure {
             val reason = it.message.orEmpty().trim().let { m -> if (m.endsWith('?') || m.endsWith('.')) m else "$m." }
+            FailureNotification.show(this, reason)
             return keepForRetry(node, "Not sent: $reason Tap ↻ to retry.")
         }
+        FailureNotification.clear(this)
         val dictation = result.getOrThrow()
         if (dictation.text.isBlank()) {
             setState(MicState.IDLE)

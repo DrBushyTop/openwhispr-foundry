@@ -50,4 +50,6 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is a stub in local unit tests.
+    testImplementation("org.json:json:20250517")
 }
