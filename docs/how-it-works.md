@@ -44,6 +44,8 @@ The upload format differs per backend. MAI gets 48 kbps MP3, which is about 5x s
 
 LLM Speech's `enhancedMode.prompt` can't do dictation cleanup. It changes output format (`Output must be in lexical format.` works), but it ignored rules like "keep only the corrected version" and "convert spoken period to .". Cleanup belongs in OpenWhispr's Language Models step.
 
+Azure answers a 30s clip in about a second, but now and then it takes the upload and never answers. So speech requests time out after 30s, plus a second for every 4s of audio, instead of the general 120s. A timed-out dictation is sent once more on a new connection, and the idle connections to that host are dropped. A second timeout returns an error.
+
 ## Connection reuse
 
 The shim keeps HTTPS connections to Azure open between requests. A new connection costs about 170ms (TCP plus TLS, with a ~55ms round trip from Italy). Only the first request to each host after a restart pays it. The log shows `conn=new` or `conn=reused` on each line. Azure closed idle connections somewhere between 90 and 180 seconds in testing, so the shim drops them after 100s. The first dictation after a longer pause opens a new connection. If Azure closes one sooner, the attempt fails instantly and the shim reconnects.
@@ -152,4 +154,4 @@ A few names aren't settings, because nothing breaks if you keep them: the Launch
 
 ## Logs
 
-Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. Realtime sessions write `rt` lines when they open and close, when a stream's language changes, and for each retry or failed segment. `phrases:` lines show how many phrases meetings get.
+Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. A dictation that times out writes an `stt:` line with the upload size before it's tried again. Realtime sessions write `rt` lines when they open and close, when a stream's language changes, and for each retry or failed segment. `phrases:` lines show how many phrases meetings get.

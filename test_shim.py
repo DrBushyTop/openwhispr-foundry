@@ -76,6 +76,41 @@ class DefinitionTests(unittest.TestCase):
         self.assertIsNone(stt.extract_locale({}))
 
 
+class SttTimeoutTests(unittest.TestCase):
+    def test_timeout_grows_with_audio_length(self):
+        self.assertEqual(stt.stt_timeout(b"", "llm-speech"), stt.STT_TIMEOUT_S)
+        self.assertEqual(stt.stt_timeout(b"\0" * 32_000 * 120, "llm-speech"), stt.STT_TIMEOUT_S + 30)
+        self.assertEqual(stt.stt_timeout(b"\0" * 6_000 * 120, "mai"), stt.STT_TIMEOUT_S + 30)
+
+    def transcribe(self, *results):
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"audio")
+        self.addCleanup(os.remove, f.name)
+        with mock.patch.object(stt, "recognize", side_effect=list(results)) as recognize:
+            try:
+                return stt.transcribe(f.name, "llm-speech", None, None), recognize
+            except Exception as exc:
+                return exc, recognize
+
+    def test_unanswered_request_is_tried_once_more(self):
+        text, recognize = self.transcribe(foundry.UpstreamTimeout(30, True), "Hei.")
+        self.assertEqual(text, "Hei.")
+        self.assertEqual(recognize.call_count, 2)
+
+    def test_second_timeout_gives_up(self):
+        exc, recognize = self.transcribe(foundry.UpstreamTimeout(30, True), foundry.UpstreamTimeout(30, False), "late")
+        self.assertIsInstance(exc, foundry.UpstreamTimeout)
+        self.assertEqual(recognize.call_count, 2)
+
+    def test_other_errors_are_not_retried(self):
+        exc, recognize = self.transcribe(foundry.UpstreamError(400, b"bad"), "late")
+        self.assertIsInstance(exc, foundry.UpstreamError)
+        self.assertEqual(recognize.call_count, 1)
+
+
 class ChatAdaptTests(unittest.TestCase):
     def test_openwhispr_lan_body(self):
         # What OpenWhispr's self-hosted chat sends with "Disable thinking output" on.
@@ -143,6 +178,21 @@ class PoolTests(unittest.TestCase):
             foundry.PooledResponse("h", conn, partial, False).close()
             conn.close.assert_called_once()
             self.assertFalse(pool.get("h")[1])
+
+    def test_timeout_drops_idle_connections(self):
+        pool = foundry.ConnectionPool()
+        idle, stuck = mock.Mock(), mock.Mock()
+        stuck.getresponse.side_effect = TimeoutError("The read operation timed out")
+        pool.put("example.azure.com", idle)
+        with mock.patch.object(foundry, "POOL", pool), \
+                mock.patch.object(pool, "get", return_value=(stuck, True)):
+            with self.assertRaises(foundry.UpstreamTimeout) as caught:
+                foundry.send_pooled("https://example.azure.com/x", b"", {}, timeout=5)
+        self.assertEqual(stuck.timeout, 5)
+        self.assertTrue(caught.exception.reused)
+        stuck.close.assert_called_once()
+        idle.close.assert_called_once()
+        self.assertEqual(pool._idle, {})
 
 
 class ConfigTests(unittest.TestCase):

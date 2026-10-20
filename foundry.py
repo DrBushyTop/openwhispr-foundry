@@ -91,6 +91,14 @@ class UpstreamError(Exception):
         self.body = body
 
 
+class UpstreamTimeout(TimeoutError):
+    """Azure took the request but didn't answer within the timeout."""
+
+    def __init__(self, seconds: float, reused: bool) -> None:
+        super().__init__(f"Azure didn't answer in {seconds:.0f}s ({'reused' if reused else 'new'} connection)")
+        self.reused = reused
+
+
 # ---------------------------------------------------------------- connection reuse
 # A fresh TLS connection to Azure costs ~170ms (measured: tcp ~55ms + tls ~110ms).
 # Keeping connections open between requests skips that on every warm request.
@@ -116,6 +124,12 @@ class ConnectionPool:
     def put(self, host: str, conn: http.client.HTTPSConnection) -> None:
         with self._lock:
             self._idle.setdefault(host, []).append((conn, time.monotonic()))
+
+    def drop(self, host: str) -> None:
+        """Closes every idle connection to host."""
+        with self._lock:
+            for conn, _ in self._idle.pop(host, []):
+                conn.close()
 
 
 POOL = ConnectionPool()
@@ -158,14 +172,24 @@ class PooledResponse:
         self.close()
 
 
-def send_pooled(url: str, body: bytes, headers: dict[str, str]) -> PooledResponse:
+def send_pooled(url: str, body: bytes, headers: dict[str, str],
+                timeout: float = UPSTREAM_TIMEOUT_S) -> PooledResponse:
     parts = urllib.parse.urlsplit(url)
     path = parts.path + (f"?{parts.query}" if parts.query else "")
     while True:
         conn, reused = POOL.get(parts.netloc)
+        # A pooled connection would otherwise keep the timeout of its last request.
+        conn.timeout = timeout
+        if conn.sock:
+            conn.sock.settimeout(timeout)
         try:
             conn.request("POST", path, body=body, headers=headers)
             return PooledResponse(parts.netloc, conn, conn.getresponse(), reused)
+        except TimeoutError:
+            conn.close()
+            # The other idle connections to Azure may be stuck the same way.
+            POOL.drop(parts.netloc)
+            raise UpstreamTimeout(timeout, reused) from None
         except STALE_CONNECTION_ERRORS:
             conn.close()
             if not reused:
@@ -173,14 +197,15 @@ def send_pooled(url: str, body: bytes, headers: dict[str, str]) -> PooledRespons
             # Azure closed the idle connection; take another one or open a fresh one.
 
 
-def open_azure(url: str, body: bytes, content_type: str) -> PooledResponse:
+def open_azure(url: str, body: bytes, content_type: str,
+               timeout: float = UPSTREAM_TIMEOUT_S) -> PooledResponse:
     """POST with the az CLI token and return the open response.
     Retries once with a fresh token on 401. Raises UpstreamError on other errors."""
     for attempt in (1, 2):
         resp = send_pooled(url, body, {
             "Content-Type": content_type,
             "Authorization": f"Bearer {TOKEN.get()}",
-        })
+        }, timeout)
         if resp.status < 400:
             return resp
         with resp:

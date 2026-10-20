@@ -138,6 +138,18 @@ UPLOAD_FORMATS = {
     "mai": ("mp3", "audio/mpeg", ["-b:a", "48k", "-f", "mp3"]),
     "llm-speech": ("wav", "audio/wav", ["-f", "wav"]),
 }
+# Bytes per second of audio in each upload format, to tell a clip's length from its size.
+UPLOAD_BYTES_PER_S = {"mai": 6_000, "llm-speech": 32_000}
+
+# Azure answers a 30 s clip in about a second, but now and then it takes the
+# upload and never answers. Waiting the general 120 s for that kept the phone
+# spinning for two minutes, so speech gets 30 s, plus a second for every 4 s of
+# audio so long clips still have time.
+STT_TIMEOUT_S = 30
+
+
+def stt_timeout(audio: bytes, backend: str) -> float:
+    return STT_TIMEOUT_S + len(audio) / UPLOAD_BYTES_PER_S[backend] / 4
 
 
 def convert_audio(input_path: str, backend: str) -> str:
@@ -186,7 +198,7 @@ def recognize_with_locale(audio: bytes, model: str, language: str | None,
         {"audio": (f"audio.{ext}", mime, audio)},
     )
     started = time.monotonic()
-    with open_azure(url, body, ctype) as resp:
+    with open_azure(url, body, ctype, stt_timeout(audio, backend)) as resp:
         result = json.loads(resp.read())
         reused = resp.reused
     text = extract_text(result)
@@ -198,6 +210,13 @@ def recognize_with_locale(audio: bytes, model: str, language: str | None,
 
 
 def transcribe(audio_path: str, model: str, language: str | None, prompt: str | None) -> str:
-    """Transcribe a file already converted by convert_audio()."""
+    """Transcribe a file already converted by convert_audio(). A request Azure
+    doesn't answer gets one more try, on a new connection. The realtime route
+    retries on its own."""
     with open(audio_path, "rb") as f:
-        return recognize(f.read(), model, language, prompt)
+        audio = f.read()
+    try:
+        return recognize(audio, model, language, prompt)
+    except TimeoutError as exc:
+        log(f"stt: {exc}, upload={len(audio) // 1024}KB; trying once more")
+        return recognize(audio, model, language, prompt)
