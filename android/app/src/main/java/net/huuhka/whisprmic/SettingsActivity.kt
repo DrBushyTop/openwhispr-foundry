@@ -44,6 +44,7 @@ class SettingsActivity : Activity() {
     private lateinit var connection: TextView
     private lateinit var microphoneButton: Button
     private lateinit var accessibilityButton: Button
+    private lateinit var stops: TextView
     private lateinit var dictionaryPage: DictionaryPage
     private lateinit var appsPage: AppsPage
     private lateinit var setupPage: View
@@ -176,6 +177,15 @@ class SettingsActivity : Activity() {
         }
         column.addView(accessibilityButton)
 
+        column.addView(heading("Recent stops"))
+        column.addView(hint("If the mic keeps turning off in Accessibility, this shows what stopped the app."))
+        stops = TextView(this).apply {
+            textSize = 13f
+            setPadding(0, dp(8), 0, 0)
+            setTextIsSelectable(true)
+        }
+        column.addView(stops)
+
         column.addView(heading("OpenWhispr"))
         column.addView(label("Server URL"))
         serverUrl = field(prefs.serverUrl, "https://m1.your-tailnet.ts.net:8450", InputType.TYPE_TEXT_VARIATION_URI)
@@ -222,6 +232,8 @@ class SettingsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
+        // Android connects the service a moment after an update or after it's turned on.
+        MicAccessibilityService.onRunningChanged = { refreshStatus() }
         // The mic's "Hide in" and new learned words change these while the app is in the background.
         appsPage.refresh()
         if (tab == Tab.DICTIONARY) dictionaryPage.reload()
@@ -229,6 +241,7 @@ class SettingsActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        MicAccessibilityService.onRunningChanged = null
         prefs.serverUrl = serverUrl.text.toString()
         prefs.token = token.text.toString()
     }
@@ -263,21 +276,28 @@ class SettingsActivity : Activity() {
     private fun notificationsAllowed() = Build.VERSION.SDK_INT < 33 ||
         checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-    private fun setupComplete() = microphoneAllowed() && notificationsAllowed() && accessibilityEnabled() && prefs.isConfigured
+    private fun setupComplete() = microphoneAllowed() && notificationsAllowed() && accessibilityEnabled() &&
+        MicAccessibilityService.running && prefs.isConfigured
 
     private fun refreshStatus() {
         val microphone = microphoneAllowed()
         val notifications = notificationsAllowed()
         val accessibility = accessibilityEnabled()
+        val running = MicAccessibilityService.running
         microphoneButton.visibility = if (microphone && notifications) View.GONE else View.VISIBLE
-        accessibilityButton.visibility = if (accessibility) View.GONE else View.VISIBLE
+        accessibilityButton.visibility = if (accessibility && running) View.GONE else View.VISIBLE
         status.text = listOf(
             (if (microphone) "✓" else "✗") + " Microphone allowed",
             (if (notifications) "✓" else "✗") + " Notifications allowed (needed to see errors)",
-            (if (accessibility) "✓" else "✗") + " Mic button turned on in Accessibility",
+            when {
+                !accessibility -> "✗ Mic button turned on in Accessibility"
+                running -> "✓ Mic button turned on in Accessibility"
+                else -> "✗ Mic button is on in Accessibility, but Android isn't running it. Turn it off and on again."
+            },
             (if (prefs.isConfigured) "✓" else "✗") + " Server and token set",
             (if (prefs.hasApps) "✓" else "✗") + " Apps chosen for the mic, in the Apps tab",
         ).joinToString("\n")
+        stops.text = StopHistory.describe(this)
         markTab(Tab.SETUP, !setupComplete())
         markTab(Tab.APPS, !prefs.hasApps)
     }

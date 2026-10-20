@@ -95,7 +95,7 @@ The app has three tabs. The two you come back to are first; the one you set once
 
 - **Dictionary.** See [The dictionary](#the-dictionary).
 - **Apps.** Where the mic shows. "Only in apps I choose" is the default: the mic shows in the apps you tick and nowhere else. "In every app" flips it around, so the list is the apps to hide it in. Each mode keeps its own list. The list is searchable, with ticked apps first. The mic never shows in password fields or in Whispr Mic itself.
-- **Setup.** What's still missing, the server URL and token, and the button's options: **Lock it in place** (holding the button no longer picks it up) and **Move it back to the default spot** (back on the right, just above the keyboard). A short how-to is at the bottom.
+- **Setup.** What's still missing, why the app stopped lately, the server URL and token, and the button's options: **Lock it in place** (holding the button no longer picks it up) and **Move it back to the default spot** (back on the right, just above the keyboard). A short how-to is at the bottom.
 
 ## Troubleshooting
 
@@ -115,7 +115,7 @@ The app has three tabs. The two you come back to are first; the one you set once
 
 **"OpenWhispr Patched on the Mac needs updating for this"** in the Dictionary tab. The Mac app was built before the dictionary endpoints. Rebuild it with the current `mobile-dictation.patch`.
 
-**No mic button.** Check that the accessibility service is still on; Android turns it off when the app is force-stopped or updated through some installers. Also check that the app is ticked in the Apps tab.
+**No mic button.** Check the Setup tab's Status. Android turns the accessibility service off when the app is force-stopped, and some phones force-stop apps when you swipe them away in recents or run a cleanup; lock the app in recents and leave it out of cleanups. **Recent stops** on the Setup tab shows why the app stopped lately, including crashes. The status also says when the service is on but Android isn't running it; turning it off and on again fixes that. Also check that the app is ticked in the Apps tab.
 
 ## How it works
 
@@ -141,5 +141,6 @@ The server side is in [openwhispr-patch/README.md](../openwhispr-patch/README.md
 | `SettingsActivity.kt` | the settings, its tabs and the Setup tab |
 | `DictionaryPage.kt`, `AppsPage.kt` | the Dictionary and Apps tabs |
 | `Prefs.kt` | stored settings |
+| `StopHistory.kt` | why the app stopped lately, for the Setup tab |
 
 Run the unit tests with `./gradlew testDebugUnitTest`.

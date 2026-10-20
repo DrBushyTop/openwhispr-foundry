@@ -98,6 +98,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
             touchable = false,
         )
         RecorderService.listener = this
+        running = true
         scheduleUpdate()
     }
 
@@ -107,6 +108,7 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
 
     override fun onDestroy() {
         destroyed = true
+        running = false
         if (state == MicState.STARTING || state == MicState.RECORDING) recorderCommand(RecorderService.ACTION_CANCEL)
         RecorderService.listener = null
         // Android can destroy the service before it ever connected.
@@ -689,6 +691,18 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
     }
 
     companion object {
+        /**
+         * Whether Android has this service running. It can be on in Accessibility
+         * settings and still not run, which the Setup tab points out.
+         */
+        var running = false
+            private set(value) {
+                field = value
+                onRunningChanged?.invoke()
+            }
+
+        /** Called on the main thread when [running] changes, so an open Setup tab can update. */
+        var onRunningChanged: (() -> Unit)? = null
         private const val TAG = "WhisprMic"
         private const val UPDATE_DELAY_MS = 80L
         private const val DEFAULT_RIGHT_DP = 12
