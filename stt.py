@@ -141,15 +141,20 @@ UPLOAD_FORMATS = {
 # Bytes per second of audio in each upload format, to tell a clip's length from its size.
 UPLOAD_BYTES_PER_S = {"mai": 6_000, "llm-speech": 32_000}
 
-# Azure answers a 30 s clip in about a second, but now and then it takes the
-# upload and never answers. Waiting the general 120 s for that kept the phone
-# spinning for two minutes, so speech gets 30 s, plus a second for every 4 s of
-# audio so long clips still have time.
-STT_TIMEOUT_S = 30
+# Azure answers in a few seconds even for two minutes of audio (the slowest of
+# 130 LLM Speech requests took 4.4 s), but now and then it takes the upload and
+# never answers. Waiting the general 120 s for that kept the phone spinning for
+# two minutes, so speech gets 15 s, plus a second for every 10 s of audio.
+STT_TIMEOUT_S = 15
+
+# What a dictation goes to when LLM Speech doesn't answer. Sending LLM Speech
+# the same clip again didn't help: one 36 s clip went unanswered four times in a
+# row, while other clips around it came back in under a second.
+FALLBACK_MODEL = "mai-transcribe-2"
 
 
 def stt_timeout(audio: bytes, backend: str) -> float:
-    return STT_TIMEOUT_S + len(audio) / UPLOAD_BYTES_PER_S[backend] / 4
+    return STT_TIMEOUT_S + len(audio) / UPLOAD_BYTES_PER_S[backend] / 10
 
 
 def convert_audio(input_path: str, backend: str) -> str:
@@ -210,13 +215,24 @@ def recognize_with_locale(audio: bytes, model: str, language: str | None,
 
 
 def transcribe(audio_path: str, model: str, language: str | None, prompt: str | None) -> str:
-    """Transcribe a file already converted by convert_audio(). A request Azure
-    doesn't answer gets one more try, on a new connection. The realtime route
-    retries on its own."""
+    """Transcribe a file already converted by convert_audio(). When Azure doesn't
+    answer, LLM Speech hands the clip to FALLBACK_MODEL, and MAI-Transcribe tries
+    once more on a new connection. The realtime route retries on its own."""
     with open(audio_path, "rb") as f:
         audio = f.read()
     try:
         return recognize(audio, model, language, prompt)
     except TimeoutError as exc:
-        log(f"stt: {exc}, upload={len(audio) // 1024}KB; trying once more")
-        return recognize(audio, model, language, prompt)
+        if resolve_model(model)[0] != "llm-speech":
+            log(f"stt: {exc}, upload={len(audio) // 1024}KB; trying once more")
+            return recognize(audio, model, language, prompt)
+        log(f"stt: LLM Speech: {exc}, upload={len(audio) // 1024}KB; trying {FALLBACK_MODEL}")
+    # LLM Speech's upload is WAV; MAI-Transcribe takes MP3.
+    mp3_path = convert_audio(audio_path, resolve_model(FALLBACK_MODEL)[0])
+    try:
+        with open(mp3_path, "rb") as f:
+            return recognize(f.read(), FALLBACK_MODEL, language, prompt)
+    except TimeoutError as exc:
+        raise TimeoutError(f"Azure didn't answer, with LLM Speech or {FALLBACK_MODEL}") from exc
+    finally:
+        os.remove(mp3_path)

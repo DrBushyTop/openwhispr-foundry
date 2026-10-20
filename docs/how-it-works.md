@@ -44,7 +44,7 @@ The upload format differs per backend. MAI gets 48 kbps MP3, which is about 5x s
 
 LLM Speech's `enhancedMode.prompt` can't do dictation cleanup. It changes output format (`Output must be in lexical format.` works), but it ignored rules like "keep only the corrected version" and "convert spoken period to .". Cleanup belongs in OpenWhispr's Language Models step.
 
-Azure answers a 30s clip in about a second, but now and then it takes the upload and never answers. So speech requests time out after 30s, plus a second for every 4s of audio, instead of the general 120s. A timed-out dictation is sent once more on a new connection, and the idle connections to that host are dropped. A second timeout returns an error.
+Azure answers in a few seconds even for two minutes of audio (the slowest of 130 LLM Speech requests took 4.4s), but now and then it takes the upload and never answers. So speech requests time out after 15s, plus a second for every 10s of audio, instead of the general 120s, and the idle connections to that host are dropped. Sending LLM Speech the same clip again didn't help: one 36s clip went unanswered four times in a row while other clips around it came back in under a second. So a dictation LLM Speech doesn't answer goes to `mai-transcribe-2` instead, which runs in another region. A MAI-Transcribe dictation that times out is sent once more. If that fails too, the request returns an error.
 
 ## Connection reuse
 
@@ -154,4 +154,4 @@ A few names aren't settings, because nothing breaks if you keep them: the Launch
 
 ## Logs
 
-Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. A dictation that times out writes an `stt:` line with the upload size before it's tried again. Realtime sessions write `rt` lines when they open and close, when a stream's language changes, and for each retry or failed segment. `phrases:` lines show how many phrases meetings get.
+Logs go to `~/Library/Logs/openwhispr-foundry-shim.log`. Each request writes one `stt` or `chat` line with its latency and `conn=new` or `conn=reused`. A dictation that times out writes an `stt:` line with the upload size, and says what it tries next. Realtime sessions write `rt` lines when they open and close, when a stream's language changes, and for each retry or failed segment. `phrases:` lines show how many phrases meetings get.

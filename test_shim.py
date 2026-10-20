@@ -79,34 +79,50 @@ class DefinitionTests(unittest.TestCase):
 class SttTimeoutTests(unittest.TestCase):
     def test_timeout_grows_with_audio_length(self):
         self.assertEqual(stt.stt_timeout(b"", "llm-speech"), stt.STT_TIMEOUT_S)
-        self.assertEqual(stt.stt_timeout(b"\0" * 32_000 * 120, "llm-speech"), stt.STT_TIMEOUT_S + 30)
-        self.assertEqual(stt.stt_timeout(b"\0" * 6_000 * 120, "mai"), stt.STT_TIMEOUT_S + 30)
+        self.assertEqual(stt.stt_timeout(b"\0" * 32_000 * 120, "llm-speech"), stt.STT_TIMEOUT_S + 12)
+        self.assertEqual(stt.stt_timeout(b"\0" * 6_000 * 120, "mai"), stt.STT_TIMEOUT_S + 12)
 
-    def transcribe(self, *results):
+    def transcribe(self, model, *results):
         import os
         import tempfile
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(b"audio")
+            f.write(b"wav")
         self.addCleanup(os.remove, f.name)
-        with mock.patch.object(stt, "recognize", side_effect=list(results)) as recognize:
+
+        def convert(path, backend):
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as out:
+                out.write(b"mp3")
+            return out.name
+
+        with mock.patch.object(stt, "recognize", side_effect=list(results)) as recognize, \
+                mock.patch.object(stt, "convert_audio", side_effect=convert):
             try:
-                return stt.transcribe(f.name, "llm-speech", None, None), recognize
+                return stt.transcribe(f.name, model, None, None), recognize
             except Exception as exc:
                 return exc, recognize
 
-    def test_unanswered_request_is_tried_once_more(self):
-        text, recognize = self.transcribe(foundry.UpstreamTimeout(30, True), "Hei.")
+    def test_unanswered_llm_speech_goes_to_mai(self):
+        text, recognize = self.transcribe("llm-speech", foundry.UpstreamTimeout(15, True), "Hei.")
         self.assertEqual(text, "Hei.")
+        self.assertEqual([c.args[:2] for c in recognize.call_args_list],
+                         [(b"wav", "llm-speech"), (b"mp3", stt.FALLBACK_MODEL)])
+
+    def test_fallback_timeout_gives_up(self):
+        exc, recognize = self.transcribe(
+            "llm-speech", foundry.UpstreamTimeout(15, True), foundry.UpstreamTimeout(15, False), "late")
+        self.assertIsInstance(exc, TimeoutError)
+        self.assertIn("LLM Speech", str(exc))
         self.assertEqual(recognize.call_count, 2)
 
-    def test_second_timeout_gives_up(self):
-        exc, recognize = self.transcribe(foundry.UpstreamTimeout(30, True), foundry.UpstreamTimeout(30, False), "late")
-        self.assertIsInstance(exc, foundry.UpstreamTimeout)
-        self.assertEqual(recognize.call_count, 2)
+    def test_unanswered_mai_is_tried_once_more(self):
+        text, recognize = self.transcribe("mai-transcribe-2", foundry.UpstreamTimeout(15, True), "Hei.")
+        self.assertEqual(text, "Hei.")
+        self.assertEqual([c.args[:2] for c in recognize.call_args_list],
+                         [(b"wav", "mai-transcribe-2")] * 2)
 
     def test_other_errors_are_not_retried(self):
-        exc, recognize = self.transcribe(foundry.UpstreamError(400, b"bad"), "late")
+        exc, recognize = self.transcribe("llm-speech", foundry.UpstreamError(400, b"bad"), "late")
         self.assertIsInstance(exc, foundry.UpstreamError)
         self.assertEqual(recognize.call_count, 1)
 
