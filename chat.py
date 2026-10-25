@@ -14,12 +14,23 @@ from foundry import UpstreamError, log, open_azure
 CHAT_ENDPOINT = os.environ.get(
     "FOUNDRY_CHAT_ENDPOINT", "https://opencode-lpqn3wrkin5y2.openai.azure.com/openai/v1"
 )
-# Deployment names listed on GET /models. Requests for other deployments still pass through.
-# mini/nano/luna for dictation cleanup (fast); gpt-6-sol for note formatting,
+# Model names listed on GET /models. Requests for other deployments still pass through.
+# mini/luna for dictation cleanup (fast); gpt-6-sol for note formatting,
 # where a meeting summary can take a few seconds.
 CHAT_MODELS = [m.strip() for m in os.environ.get(
-    "FOUNDRY_CHAT_MODELS", "gpt-5.4-mini,gpt-5.4-nano,gpt-6-luna,gpt-6-sol"
+    "FOUNDRY_CHAT_MODELS", "gpt-5.4-mini,gpt-6-luna,gpt-6-sol"
 ).split(",") if m.strip()]
+# Model name OpenWhispr sends -> deployment the shim calls. The -eu deployments
+# are DataZoneStandard, so prompts are processed only in EU regions; the plain
+# names are GlobalStandard, which can be processed in any Azure region. Mapping
+# here keeps OpenWhispr's saved model names working. gpt-5.4-nano has no EU
+# data zone deployment, so it isn't listed.
+CHAT_DEPLOYMENTS = dict(
+    pair.split("=", 1) for pair in (p.strip() for p in os.environ.get(
+        "FOUNDRY_CHAT_DEPLOYMENTS",
+        "gpt-5.4-mini=gpt-5.4-mini-eu,gpt-6-luna=gpt-6-luna-eu,gpt-6-sol=gpt-6-sol-eu",
+    ).split(",")) if "=" in pair
+)
 
 
 def adapt_chat_body(body: dict) -> dict:
@@ -30,8 +41,11 @@ def adapt_chat_body(body: dict) -> dict:
     - reasoning {effort}, think, thinking, chat_template_kwargs: OpenWhispr's
       "Disable thinking output" hints for Ollama/vLLM. Azure 400s on them.
       They become reasoning_effort, so OpenWhispr's toggle still decides.
+    - model: mapped through CHAT_DEPLOYMENTS.
     """
     body = dict(body)
+    if body.get("model") in CHAT_DEPLOYMENTS:
+        body["model"] = CHAT_DEPLOYMENTS[body["model"]]
     if "max_tokens" in body:
         tokens = body.pop("max_tokens")
         body.setdefault("max_completion_tokens", tokens)

@@ -106,8 +106,9 @@ With the current mic rules, Finnish speech with 800–900ms thinking pauses stay
 
 ## Language models
 
-`GET /models` lists `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-6-luna` and `gpt-6-sol`, which are deployments on `opencode-lpqn3wrkin5y2`. `POST /chat/completions` forwards any deployment name, streaming included. OpenWhispr owns the prompts. The shim changes only the parameters Azure rejects:
+`GET /models` lists `gpt-5.4-mini`, `gpt-6-luna` and `gpt-6-sol`. `POST /chat/completions` forwards any deployment name on `opencode-lpqn3wrkin5y2`, streaming included. OpenWhispr owns the prompts. The shim changes only the model name and the parameters Azure rejects:
 
+- It maps the model name through `FOUNDRY_CHAT_DEPLOYMENTS`. By default the three listed models go to `-eu` deployments with the Data Zone Standard SKU, which processes prompts only in EU regions. The deployments with the plain names are Global Standard. gpt-5.4-nano isn't offered as Data Zone Standard in swedencentral, so it isn't listed.
 - It renames `max_tokens` to `max_completion_tokens`. gpt-5 and newer on Azure reject `max_tokens`.
 - OpenWhispr's "Disable thinking output" toggle sends `reasoning: {effort}`, `think`, `thinking` or `chat_template_kwargs`, which are Ollama and vLLM hints. The shim turns them into `reasoning_effort`, so the toggle still works. Without a hint, the model's default applies.
 - If Azure rejects a parameter by name, the shim retries without it. For example, gpt-6-luna rejects `temperature` when thinking is on.

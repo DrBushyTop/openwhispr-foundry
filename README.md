@@ -107,14 +107,15 @@ For speech-to-text, type one of these in the Model field:
 | `mai-transcribe-1.5` | The previous MAI version. |
 | `llm-speech` | Alternative backend. Leave OpenWhispr's language on auto, since a forced language made it return lowercase text with no punctuation. |
 
-For language models, the Refresh button lists the deployments in `FOUNDRY_CHAT_MODELS`. With the default config:
+For language models, the Refresh button lists the models in `FOUNDRY_CHAT_MODELS`. With the default config:
 
 | Model | When to use it |
 | --- | --- |
 | `gpt-5.4-mini` | Dictation cleanup. The most faithful to what you said in testing. |
-| `gpt-5.4-nano` | Dictation cleanup. Sometimes trims your wording. |
 | `gpt-6-luna` | Dictation cleanup, a bit slower. |
 | `gpt-6-sol` | Meeting notes. Slower, but better at telling a proposal from a decision. |
+
+The shim sends these three to EU data zone deployments (`gpt-5.4-mini-eu` and so on, set in `FOUNDRY_CHAT_DEPLOYMENTS`), so your transcripts are processed only in EU regions. The deployments with the plain names are Global Standard, which Azure can process in any region. gpt-5.4-nano has no EU data zone version, so it's no longer listed. Speech stays in Europe too: MAI-Transcribe runs in swedencentral and LLM Speech in northeurope.
 
 ## Spoken Finnish
 

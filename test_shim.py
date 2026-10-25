@@ -137,6 +137,11 @@ class ChatAdaptTests(unittest.TestCase):
             "model": "gpt-5.4-nano", "messages": [], "stream": True,
             "max_completion_tokens": 4096, "temperature": 0, "reasoning_effort": "none"})
 
+    def test_model_mapped_to_eu_deployment(self):
+        with mock.patch.dict(chat.CHAT_DEPLOYMENTS, {"gpt-5.4-mini": "gpt-5.4-mini-eu"}, clear=True):
+            self.assertEqual(chat.adapt_chat_body({"model": "gpt-5.4-mini"})["model"], "gpt-5.4-mini-eu")
+            self.assertEqual(chat.adapt_chat_body({"model": "other"})["model"], "other")
+
     def test_thinking_left_to_model_default(self):
         out = chat.adapt_chat_body({"model": "m", "messages": [], "max_completion_tokens": 10})
         self.assertNotIn("reasoning_effort", out)
