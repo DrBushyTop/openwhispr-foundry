@@ -6,6 +6,8 @@ Scripts that build a patched copy of OpenWhispr, installed as a separate app cal
 - **Screenshots in notes.** Paste a slide into a meeting note, and note actions like Generate Notes send it to the model with the transcript.
 - **Dictation from your phone.** The [Whispr Mic](../android/README.md) Android app sends recordings to the app over Tailscale and gets back text cleaned up with your settings.
 
+The patches contain and modify OpenWhispr source code (MIT, Copyright (c) 2024 OpenWhispr Team). See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
 Plain dictation and text cleanup work with the official app. You don't need this for those.
 
 ## Quickstart

@@ -171,3 +171,7 @@ This stops the shim, removes both LaunchAgents and unsets the meetings variable.
 - [android/README.md](android/README.md): the Whispr Mic phone app.
 
 Run the tests with `python3 test_shim.py`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Includes code from OpenWhispr and OpenDictate, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

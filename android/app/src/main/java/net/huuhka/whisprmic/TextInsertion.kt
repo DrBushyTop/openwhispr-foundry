@@ -6,6 +6,9 @@ data class FieldText(val text: String, val selectionStart: Int, val selectionEnd
 /** The field's new text. The dictation, with any spaces added around it, runs from [start] to [cursor]. */
 data class Insertion(val text: String, val start: Int, val cursor: Int)
 
+// The selection clamping in insertDictation and the placeholder check in realFieldText are
+// adapted from OpenDictate (MIT, Copyright (c) 2026 OpenDictate contributors); see THIRD_PARTY_NOTICES.md.
+
 /**
  * Puts dictated text at the cursor, replacing any selection, with a space on
  * either side where it would otherwise run into a word. Without a cursor

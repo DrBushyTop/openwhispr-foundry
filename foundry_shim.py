@@ -46,7 +46,8 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 
 
 # parse_multipart_form and the transcription handler follow OpenWhispr's
-# examples/custom-asr-shim/shim_template.py.
+# examples/custom-asr-shim/shim_template.py (Copyright (c) 2024 OpenWhispr Team,
+# MIT; see THIRD_PARTY_NOTICES.md).
 
 def parse_multipart_form(body: bytes, content_type: str) -> tuple[dict[str, str], dict[str, tuple[str, bytes]]]:
     m = re.search(r'boundary="?([^";]+)"?', content_type)

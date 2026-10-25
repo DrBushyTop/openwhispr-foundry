@@ -478,6 +478,8 @@ class MicAccessibilityService : AccessibilityService(), RecorderService.Listener
 
     // --- Helpers ---
 
+    // focusedField and focusedEditable are adapted from OpenDictate (MIT, Copyright (c) 2026
+    // OpenDictate contributors); see THIRD_PARTY_NOTICES.md.
     private fun focusedField(): AccessibilityNodeInfo? {
         val roots = listOfNotNull(rootInActiveWindow) +
             windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.mapNotNull { it.root }
