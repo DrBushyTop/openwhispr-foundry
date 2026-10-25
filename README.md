@@ -67,7 +67,7 @@ Each setting in `config.example.env` has a comment explaining it. `config.env` i
 ./install-launchagent.sh
 ```
 
-This installs a LaunchAgent that starts the shim now and at every login, and restarts it if it exits. It also sets the variable the patched app uses for meetings. The official app ignores it.
+This installs a LaunchAgent that starts the shim now and at every login, and restarts it if it exits. It also sets the variable the patched app uses for meetings, which the official app ignores, and then opens OpenWhispr Patched if it's in `/Applications`. So you can turn off the app's own **Launch at login**: it didn't start the app after a reboot on M1, and it could start the app before the variable was set.
 
 To check that it's running:
 

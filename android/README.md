@@ -6,7 +6,7 @@ The recording goes to OpenWhispr Patched on your Mac over Tailscale, which runs 
 
 ## What you need
 
-- A Mac running **OpenWhispr Patched** with mobile dictation turned on (below). It has to be awake and the app open, so turn on **Launch at login** in its settings.
+- A Mac running **OpenWhispr Patched** with mobile dictation turned on (below). It has to be awake and the app open. The shim's `install-launchagent.sh` opens the app at every login.
 - Tailscale on the Mac and the phone, in the same tailnet.
 - Android 11 or newer.
 
@@ -105,7 +105,7 @@ When a dictation isn't sent, a short message shows over the screen, and a **Dict
 
 **"The token was refused".** The token in the app doesn't match `~/.openwhispr/mobile-dictation.json` on the Mac. Run `enable-mobile-dictation.sh` again to print it.
 
-**"Server answered 502" in the connection test.** Tailscale reached the Mac, but nothing listens behind it: OpenWhispr Patched isn't open, or it was already running when you created the config file. Open or restart it.
+**"Server answered 502" in the connection test, or on a dictation.** Tailscale reached the Mac, but nothing listens behind it: OpenWhispr Patched isn't open, for example after a restart without `install-launchagent.sh`, or it was already running when you created the config file. Open or restart it.
 
 **"OpenWhispr's dictation window isn't running".** The app is starting up or stuck. Wait a moment, or restart it.
 

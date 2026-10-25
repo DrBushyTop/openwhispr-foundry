@@ -3,7 +3,10 @@
 #   - the shim itself, started at login and restarted if it exits
 #   - a one-shot `launchctl setenv` that points a patched OpenWhispr's OpenAI
 #     Realtime client at the shim (see openwhispr-patch/). Apps opened from the
-#     Dock or Finder inherit launchd's environment, not your shell's.
+#     Dock or Finder inherit launchd's environment, not your shell's. It then
+#     opens OpenWhispr Patched, if it's installed, so the app starts at login
+#     after the variable is set. OpenWhispr's own "Launch at login" didn't start
+#     it after a reboot, and could start it before the variable.
 # Re-run after moving the repo. Undo with uninstall-launchagent.sh.
 set -eu
 
@@ -23,6 +26,8 @@ if [ -z "${SHIM_PORT:-}" ] && [ -f "$REPO/config.env" ]; then
 fi
 REALTIME_URL="ws://localhost:${SHIM_PORT:-9447}/v1/realtime?intent=transcription"
 PYTHON="$(command -v python3)"
+# Where openwhispr-patch/build.sh tells you to install the patched app.
+PATCHED_APP="/Applications/OpenWhispr Patched.app"
 
 # launchd starts agents with a bare PATH; the shim needs az and ffmpeg.
 for bin in az ffmpeg; do
@@ -64,10 +69,11 @@ cat > "$ENV_PLIST" <<EOF
   <key>Label</key><string>$ENV_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/launchctl</string>
-    <string>setenv</string>
-    <string>OPENWHISPR_OPENAI_REALTIME_URL</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/bin/launchctl setenv OPENWHISPR_OPENAI_REALTIME_URL "\$0"; if [ -d "\$1" ]; then /usr/bin/open -g "\$1"; fi</string>
     <string>$REALTIME_URL</string>
+    <string>$PATCHED_APP</string>
   </array>
   <key>RunAtLoad</key><true/>
 </dict>
@@ -81,5 +87,5 @@ done
 launchctl bootstrap "$DOMAIN" "$PLIST"
 launchctl bootstrap "$DOMAIN" "$ENV_PLIST"
 echo "Installed $PLIST"
-echo "Installed $ENV_PLIST (OPENWHISPR_OPENAI_REALTIME_URL=$REALTIME_URL)"
+echo "Installed $ENV_PLIST (OPENWHISPR_OPENAI_REALTIME_URL=$REALTIME_URL, then opens $PATCHED_APP if it's there)"
 echo "Logs: $LOG"
