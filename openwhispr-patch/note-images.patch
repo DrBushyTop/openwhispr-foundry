@@ -1,8 +1,8 @@
 diff --git a/main.js b/main.js
-index cf28b34d..2ac39588 100644
+index f087be23a..7e7c1c1cd 100644
 --- a/main.js
 +++ b/main.js
-@@ -28,6 +28,10 @@ const http = require("http");
+@@ -29,6 +29,10 @@ const http = require("http");
  const tls = require("tls");
  require("dotenv").config({ path: path.join(__dirname, ".env") });
  
@@ -13,7 +13,7 @@ index cf28b34d..2ac39588 100644
  // Extend Node's TLS trust with the OS store so ws and https.get see corporate
  // CAs that Chromium already trusts.
  try {
-@@ -561,6 +565,7 @@ function initializeCoreManagers() {
+@@ -693,6 +697,7 @@ function initializeCoreManagers() {
      oauthProtocolRegistered: protocolRegistered,
      oauthProtocol: OAUTH_PROTOCOL,
    });
@@ -22,12 +22,12 @@ index cf28b34d..2ac39588 100644
  
  function registerSidecars() {
 diff --git a/preload.js b/preload.js
-index 1ce36bc1..e479fa89 100644
+index b1e87c587..2b9461997 100644
 --- a/preload.js
 +++ b/preload.js
-@@ -217,6 +217,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
-   getSpaceNotes: (spaceId, limit) => ipcRenderer.invoke("db-get-space-notes", spaceId, limit),
-   updateNote: (id, updates) => ipcRenderer.invoke("db-update-note", id, updates),
+@@ -241,6 +241,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
+   undoNoteUpdate: (token) => ipcRenderer.invoke("db-undo-note-update", token),
+   discardNoteUndo: (id, token) => ipcRenderer.invoke("db-discard-note-undo", id, token),
    deleteNote: (id) => ipcRenderer.invoke("db-delete-note", id),
 +  // Local patch: screenshots pasted into notes (src/helpers/noteMedia.js).
 +  saveNoteImage: (bytes, mimeType) => ipcRenderer.invoke("note-media-save", bytes, mimeType),
@@ -36,7 +36,7 @@ index 1ce36bc1..e479fa89 100644
    exportTranscript: (noteId, format) => ipcRenderer.invoke("export-transcript", noteId, format),
    exportDictionary: (words) => ipcRenderer.invoke("export-dictionary", words),
 diff --git a/src/components/notes/PersonalNotesView.tsx b/src/components/notes/PersonalNotesView.tsx
-index b0bf0dcb..d715e6e1 100644
+index 765caeb39..14d6193bb 100644
 --- a/src/components/notes/PersonalNotesView.tsx
 +++ b/src/components/notes/PersonalNotesView.tsx
 @@ -31,6 +31,11 @@ import {
@@ -49,19 +49,19 @@ index b0bf0dcb..d715e6e1 100644
 +  labelScreenshotsInMarkdown,
 +} from "../../utils/noteScreenshots";
  import type { MentionPerson } from "../../utils/mentionMarkdown";
- import type { CalendarAttendee } from "../../types/calendar";
+ import type { CalendarAttendee, CalendarEvent } from "../../types/calendar";
  import {
-@@ -656,6 +661,8 @@ export default function PersonalNotesView({
-     const noteContent = editorNote.content;
-     const hasNotes = !!noteContent.trim();
-     if (!hasNotes && !rawTranscript) return;
+@@ -755,6 +760,8 @@ export default function PersonalNotesView({
+     // note's text and left the transcript empty (#2666).
+     const transcriptInContent = !rawTranscript && editorNote.note_type === "upload";
+     const transcriptText = transcriptInContent ? noteContent : rawTranscript;
 +    // Local patch: pasted screenshots go to the model as images (utils/noteScreenshots.ts).
 +    const screenshots = collectNoteScreenshots(noteContent);
  
      let formattedTranscript = "";
      let meetingContext = "";
-@@ -677,7 +684,16 @@ export default function PersonalNotesView({
-         };
+@@ -777,7 +784,16 @@ export default function PersonalNotesView({
+ 
          const selfLabel = identity.selfName || t("notes.speaker.you");
          meetingContext = buildMeetingContext(identity, selfLabel);
 -        formattedTranscript = buildLlmTranscript(segments, speakerMappings, selfLabel, t);
@@ -76,48 +76,48 @@ index b0bf0dcb..d715e6e1 100644
 +              )
 +            : buildLlmTranscript(segments, speakerMappings, selfLabel, t);
          knownPeople = collectKnownPeople(identity, speakerMappings, segments);
-       }
-       if (!formattedTranscript) {
-@@ -686,7 +702,7 @@ export default function PersonalNotesView({
-     }
+       } else {
+         // Plain text shows no speakers, so the run gets no Meeting Context: the model
+@@ -793,7 +809,7 @@ export default function PersonalNotesView({
  
-     const parts = [
--      hasNotes ? noteContent : "",
-+      hasNotes ? labelScreenshotsInMarkdown(noteContent, screenshots) : "",
+     const { input, fromSummary, material } = buildNoteRunInput(action, {
+       summary: editorEnhancedContent,
+-      notes: transcriptInContent ? "" : noteContent,
++      notes: transcriptInContent ? "" : labelScreenshotsInMarkdown(noteContent, screenshots),
        meetingContext,
-       formattedTranscript ? `## Meeting Transcript\n${formattedTranscript}` : "",
-     ]
-@@ -697,6 +713,7 @@ export default function PersonalNotesView({
-       modelId: effectiveModelId,
-       isMeetingNote,
+       transcript: formattedTranscript,
+     });
+@@ -805,6 +821,7 @@ export default function PersonalNotesView({
        knownPeople,
+       fromSummary,
+       material,
 +      screenshots,
        allowTitleGeneration: isRegenerableNoteTitle(
          editorNote.title,
          [t("notes.list.untitledNote"), t("notes.list.newNote"), t("notes.sidebar.newNote")],
 diff --git a/src/components/ui/RichTextEditor.tsx b/src/components/ui/RichTextEditor.tsx
-index 57785dce..91fe7281 100644
+index c40ca64a5..0956b772f 100644
 --- a/src/components/ui/RichTextEditor.tsx
 +++ b/src/components/ui/RichTextEditor.tsx
-@@ -7,6 +7,7 @@ import Placeholder from "@tiptap/extension-placeholder";
- import { Markdown } from "tiptap-markdown";
- import { cn } from "../lib/utils";
- import { createMentionExtension } from "./RichTextEditorMention";
+@@ -5,6 +5,7 @@ import { createMentionExtension } from "./RichTextEditorMention";
+ import { createRichTextExtensions } from "./RichTextEditorExtensions";
+ import { RichTextEditorFormatMenu } from "./RichTextEditorFormatMenu";
+ import { RichTextEditorTableMenu } from "./RichTextEditorTableMenu";
 +import { NoteImage } from "./noteImageExtension";
  import type { MentionPerson } from "../../utils/mentionMarkdown";
  
- interface RichTextEditorProps {
-@@ -50,6 +51,7 @@ export function RichTextEditor({
-       }),
-       TaskList,
-       TaskItem.configure({ nested: true }),
+ /**
+@@ -86,6 +87,7 @@ export function RichTextEditor({
+     extensions: [
+       ...(withMentions ? [createMentionExtension(() => mentionPeopleRef.current ?? [])] : []),
+       ...createRichTextExtensions(placeholder || ""),
 +      NoteImage,
-       Placeholder.configure({
-         placeholder: placeholder || "",
-         emptyEditorClass: "is-editor-empty",
+     ],
+     content: value,
+     editable: !disabled,
 diff --git a/src/components/ui/noteImageExtension.ts b/src/components/ui/noteImageExtension.ts
 new file mode 100644
-index 00000000..330c3349
+index 000000000..330c33490
 --- /dev/null
 +++ b/src/components/ui/noteImageExtension.ts
 @@ -0,0 +1,103 @@
@@ -226,7 +226,7 @@ index 00000000..330c3349
 +});
 diff --git a/src/helpers/noteMedia.js b/src/helpers/noteMedia.js
 new file mode 100644
-index 00000000..c7474ee4
+index 000000000..c7474ee44
 --- /dev/null
 +++ b/src/helpers/noteMedia.js
 @@ -0,0 +1,178 @@
@@ -410,7 +410,7 @@ index 00000000..c7474ee4
 +module.exports = { registerScheme, start, MODEL_MAX_IMAGES };
 diff --git a/src/helpers/noteMediaLinks.js b/src/helpers/noteMediaLinks.js
 new file mode 100644
-index 00000000..ecc1d2ee
+index 000000000..ecc1d2ee4
 --- /dev/null
 +++ b/src/helpers/noteMediaLinks.js
 @@ -0,0 +1,35 @@
@@ -450,10 +450,10 @@ index 00000000..ecc1d2ee
 +  return names;
 +}
 diff --git a/src/index.css b/src/index.css
-index 52a94aa5..49721ddb 100644
+index 3eaca4c1a..8b384aacb 100644
 --- a/src/index.css
 +++ b/src/index.css
-@@ -1768,6 +1768,22 @@ a:hover {
+@@ -1807,6 +1807,22 @@ a:hover {
    background: oklch(0.62 0.22 260 / 0.15);
  }
  
@@ -477,11 +477,11 @@ index 52a94aa5..49721ddb 100644
  .rich-text-editor-content ul[data-type="taskList"] {
    list-style: none;
 diff --git a/src/services/BaseReasoningService.ts b/src/services/BaseReasoningService.ts
-index c06e224b..80a35832 100644
+index 8a6028518..a0bc7011d 100644
 --- a/src/services/BaseReasoningService.ts
 +++ b/src/services/BaseReasoningService.ts
-@@ -5,6 +5,13 @@ import { getDictionaryHintWords } from "../utils/snippets";
- import type { InferenceScope } from "../config/inferenceScopes";
+@@ -6,6 +6,13 @@ import type { InferenceScope } from "../config/inferenceScopes";
+ import type { DictationToneStyle } from "../config/toneStyle";
  import type { ScreenContextImage } from "../types/electron";
  
 +/** Local patch: screenshots from a note, sent with a note action (see utils/noteScreenshots.ts). */
@@ -494,27 +494,27 @@ index c06e224b..80a35832 100644
  export interface ReasoningConfig {
    maxTokens?: number;
    temperature?: number;
-@@ -19,6 +26,7 @@ export interface ReasoningConfig {
-   screenContext?: ScreenContextImage;
+@@ -23,6 +30,7 @@ export interface ReasoningConfig {
+   toneStyle?: DictationToneStyle | null;
    /** Suffix-free prompt used when a screenshot-carrying request is retried text-only. */
    textOnlySystemPrompt?: string;
 +  noteImages?: NoteImageAttachments;
    language?: string;
    requireCompleteOutput?: boolean;
-   requiresAgent?: boolean;
+   /** Bundled local server only; callers must validate the decoded response. */
 diff --git a/src/services/ReasoningService.ts b/src/services/ReasoningService.ts
-index 5746733f..3e8c09b2 100644
+index 3c5b3c20c..bcf3257da 100644
 --- a/src/services/ReasoningService.ts
 +++ b/src/services/ReasoningService.ts
-@@ -38,6 +38,7 @@ import {
- } from "./ai/chatRequestBody";
+@@ -44,6 +44,7 @@ import {
  import { getModelFamilyConstraints } from "./ai/modelFamilyConstraints";
  import { detectEndpointDialect } from "./ai/thinkingSuppressionDialects";
+ import { abortOnCancel, isRequestCancelled, requestCancelledError } from "./ai/requestCancellation";
 +import { noteImageUserContent } from "./ai/noteImageContent";
  import { openCodeSessionHeaders } from "./ai/openCodeSession";
  import { createStreamingThinkFilter } from "./ai/streamingThinkFilter";
  import { extractApiErrorMessage } from "./ai/apiErrorMessage";
-@@ -296,7 +297,7 @@ class ReasoningService extends BaseReasoningService {
+@@ -308,7 +309,7 @@ class ReasoningService extends BaseReasoningService {
  
      const messages = [
        { role: "system", content: systemPrompt },
@@ -524,18 +524,18 @@ index 5746733f..3e8c09b2 100644
  
      const requestBody: any = { model, messages };
 diff --git a/src/services/ai/inferenceProviders/openai.ts b/src/services/ai/inferenceProviders/openai.ts
-index d00b407b..557573ce 100644
+index a0ec25717..476b26cec 100644
 --- a/src/services/ai/inferenceProviders/openai.ts
 +++ b/src/services/ai/inferenceProviders/openai.ts
-@@ -20,6 +20,7 @@ import {
- import { extractApiErrorMessage } from "../apiErrorMessage";
- import { wrapCleanupTranscript } from "../../../config/prompts";
- import { openCodeSessionHeaders } from "../openCodeSession";
+@@ -29,6 +29,7 @@ import {
+   providerHttpError,
+   redactProviderBody,
+ } from "../../../helpers/providerHttpErrors.js";
 +import { noteImageUserContent } from "../noteImageContent";
  
  const OPENAI_ENDPOINT_PREF_STORAGE_KEY = "openAiEndpointPreference";
  const PROBE_TIMEOUT_MS = 2_000;
-@@ -168,8 +169,15 @@ export const openaiProvider: InferenceProvider = {
+@@ -173,8 +174,15 @@ export const openaiProvider: InferenceProvider = {
        ? `data:${config.screenContext.mediaType};base64,${config.screenContext.data}`
        : null;
      // The Responses and Chat Completions APIs name image content parts differently.
@@ -553,7 +553,7 @@ index d00b407b..557573ce 100644
          ? [
              { role: "system", content: systemPrompt },
              {
-@@ -188,6 +196,7 @@ export const openaiProvider: InferenceProvider = {
+@@ -193,6 +201,7 @@ export const openaiProvider: InferenceProvider = {
              { role: "system", content: systemPrompt },
              { role: "user", content: userContent },
            ];
@@ -563,7 +563,7 @@ index d00b407b..557573ce 100644
        ? API_ENDPOINTS.OPENROUTER_BASE
 diff --git a/src/services/ai/noteImageContent.ts b/src/services/ai/noteImageContent.ts
 new file mode 100644
-index 00000000..526ecd64
+index 000000000..526ecd642
 --- /dev/null
 +++ b/src/services/ai/noteImageContent.ts
 @@ -0,0 +1,30 @@
@@ -598,21 +598,24 @@ index 00000000..526ecd64
 +  ];
 +}
 diff --git a/src/stores/actionProcessingStore.ts b/src/stores/actionProcessingStore.ts
-index 5db8ada8..66903ab2 100644
+index 34ef59243..d9d0f08d5 100644
 --- a/src/stores/actionProcessingStore.ts
 +++ b/src/stores/actionProcessingStore.ts
-@@ -1,6 +1,7 @@
+@@ -1,5 +1,9 @@
  import { create } from "zustand";
- import {
-   BASE_SYSTEM_PROMPT,
+-import { NOTE_OUTPUT_MAX_TOKENS, NOTHING_TO_SUMMARIZE } from "../helpers/builtinActions";
++import {
 +  FOLLOW_UP_EMAIL_KEY,
-   MEETING_INPUT_PREAMBLE,
-   MEETING_SYSTEM_PROMPT,
-   NOTE_INPUT_PREAMBLE,
-@@ -14,6 +15,11 @@ import { generateNoteTitle } from "../utils/generateTitle";
- import { buildNoteFormattingOverrides } from "../helpers/noteFormattingOverrides";
- import { tagActionItemOwners, type MentionPerson } from "../utils/mentionMarkdown";
- import type { ActionItem } from "../types/electron";
++  NOTE_OUTPUT_MAX_TOKENS,
++  NOTHING_TO_SUMMARIZE,
++} from "../helpers/builtinActions";
+ import { stripThinkingTags } from "../helpers/stripThinking";
+ import { compileSummaryActionPrompt, compileTemplatePrompt } from "../helpers/templatePrompts";
+ import reasoningService from "../services/ReasoningService";
+@@ -60,6 +64,11 @@ const MIN_CHUNK_BUDGET_TOKENS = 1024;
+ const MAX_PART_TOKENS = 12288;
+ const MAX_REDUCE_ROUNDS = 3;
+ const MAX_SPLIT_DEPTH = 3;
 +import {
 +  loadScreenshotAttachments,
 +  sanitizeScreenshotLinks,
@@ -621,53 +624,57 @@ index 5db8ada8..66903ab2 100644
  
  export type ActionProcessingStatus = "idle" | "processing" | "success";
  
-@@ -74,6 +80,8 @@ export interface RunActionOptions {
-   allowTitleGeneration?: boolean;
-   /** People whose names in generated action-item owners become mention tags. */
-   knownPeople?: MentionPerson[];
+@@ -502,6 +511,8 @@ export interface RunActionOptions {
+   material?: NoteMaterial;
+   /** An action's input is the note's AI summary rather than its notes and transcript. */
+   fromSummary?: boolean;
 +  /** Local patch: screenshots linked in the note, sent to the model as images. */
 +  screenshots?: NoteScreenshot[];
  }
  
  export interface RunActionLabels {
-@@ -131,12 +139,19 @@ export function runBackgroundAction(
-         options.isMeetingNote ? settings.customDictionary : undefined,
+@@ -568,6 +579,13 @@ export function runBackgroundAction(
+         options.isMeetingNote || options.hasPlainTranscript ? settings.customDictionary : undefined,
          settings.uiLanguage
        );
--      const enhanced = await reasoningService.processText(noteContent, modelId, null, {
-+      // Notes may show the screenshots inline; an email gets pasted elsewhere, so it can't.
++      // Local patch: notes may show the screenshots inline; an email gets pasted
++      // elsewhere, so it can't.
 +      const inlineScreenshots = action.translation_key !== FOLLOW_UP_EMAIL_KEY;
 +      const screenshots = await loadScreenshotAttachments(
 +        options.screenshots ?? [],
 +        inlineScreenshots
 +      );
-+      let enhanced = await reasoningService.processText(noteContent, modelId, null, {
+       const requestConfig: ReasoningConfig = {
          systemPrompt,
-         maxTokens: NOTE_OUTPUT_MAX_TOKENS,
-         temperature: 0.3,
-         disableThinking: settings.noteFormattingDisableThinking,
+         // A rewrite repeats a summary written under NOTE_OUTPUT_MAX_TOKENS, plus its edit.
+@@ -588,8 +606,9 @@ export function runBackgroundAction(
+         ...(rewritesSummary && { requireCompleteOutput: true }),
+         requestId: runId,
          ...providerOverrides,
 +        ...(screenshots ? { noteImages: screenshots.attachments } : {}),
-       });
- 
-       // IPC-bridged providers relay whatever the model returned; a blank
-@@ -144,6 +159,9 @@ export function runBackgroundAction(
-       if (!enhanced.trim()) {
-         throw new Error("Model returned no text");
+       };
+-      const enhanced = await runEnhancement({
++      let enhanced = await runEnhancement({
+         noteId,
+         noteContent,
+         modelId,
+@@ -608,6 +627,9 @@ export function runBackgroundAction(
+       if (isNothingToSummarizeReply(enhanced)) {
+         throw nothingToSummarizeError();
        }
 +      if (screenshots) {
 +        enhanced = sanitizeScreenshotLinks(enhanced, screenshots.attached, inlineScreenshots);
 +      }
  
-       if (cancelledFlags.get(noteId)) return;
+       if (isCancelled()) return;
  
 diff --git a/src/types/electron.ts b/src/types/electron.ts
-index 2118475b..edaf0384 100644
+index 20eb50657..eff3a2442 100644
 --- a/src/types/electron.ts
 +++ b/src/types/electron.ts
-@@ -1436,6 +1436,13 @@ declare global {
-         }
-       ) => Promise<{ success: boolean; note?: NoteItem }>;
+@@ -1746,6 +1746,13 @@ declare global {
+       ) => Promise<{ success: boolean; note?: NoteItem; error?: string }>;
+       discardNoteUndo: (id: number, token?: string) => Promise<void>;
        deleteNote: (id: number) => Promise<{ success: boolean }>;
 +      saveNoteImage?: (
 +        bytes: Uint8Array,
@@ -681,7 +688,7 @@ index 2118475b..edaf0384 100644
          format: "txt" | "md"
 diff --git a/src/utils/noteScreenshots.ts b/src/utils/noteScreenshots.ts
 new file mode 100644
-index 00000000..6ce5423a
+index 000000000..6ce5423aa
 --- /dev/null
 +++ b/src/utils/noteScreenshots.ts
 @@ -0,0 +1,182 @@
@@ -869,7 +876,7 @@ index 00000000..6ce5423a
 +}
 diff --git a/test/utils/noteScreenshots.test.js b/test/utils/noteScreenshots.test.js
 new file mode 100644
-index 00000000..c61b3142
+index 000000000..c61b3142f
 --- /dev/null
 +++ b/test/utils/noteScreenshots.test.js
 @@ -0,0 +1,150 @@

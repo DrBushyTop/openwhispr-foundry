@@ -58,7 +58,9 @@ openwhispr-patch/create-signing-cert.sh   # once: local code-signing certificate
 openwhispr-patch/build.sh                 # builds ../openwhispr at its newest vX.Y.Z release tag
 ```
 
-To build a specific release instead: `openwhispr-patch/build.sh ../openwhispr v1.10.2`.
+To build a specific release instead: `openwhispr-patch/build.sh ../openwhispr v1.10.4`.
+
+The patches were last updated for and tested on **OpenWhispr v1.10.4**: they apply, the app builds, the realtime smoke test passes, and `npm run typecheck` is clean. OpenWhispr's own `npm test` has 17 failures on v1.10.4 with or without the patches. A newer release may need the patches updated; `build.sh` stops and says which patch no longer applies.
 
 Then quit OpenWhispr (only one of the two apps can run at a time) and install:
 

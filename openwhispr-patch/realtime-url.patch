@@ -1,6 +1,8 @@
+diff --git a/src/helpers/openaiRealtimeStreaming.js b/src/helpers/openaiRealtimeStreaming.js
+index 79ceb03ce..cce67a54b 100644
 --- a/src/helpers/openaiRealtimeStreaming.js
 +++ b/src/helpers/openaiRealtimeStreaming.js
-@@ -144,7 +144,11 @@
+@@ -160,7 +160,11 @@ class OpenAIRealtimeStreaming {
      this._sessionExpired = false;
      this._connectionLossNotified = false;
  
