@@ -24,6 +24,7 @@ Paths work with or without a `/v1` prefix.
 | `chat.py` | chat completions forwarding and parameter fixes |
 | `test_shim.py` | tests, run with `python3 test_shim.py` |
 | `config.example.env` | every setting with its default, copy to `config.env` |
+| `docs/cleanup-prompt.txt`, `set-cleanup-prompt.sh` | OpenWhispr's cleanup prompt, changed to keep spoken Finnish, and the script that sets it in the app |
 | `openwhispr-patch/` | the OpenWhispr patches, build and signing scripts |
 
 ## Speech-to-text

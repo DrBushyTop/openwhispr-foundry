@@ -116,6 +116,20 @@ For language models, the Refresh button lists the deployments in `FOUNDRY_CHAT_M
 | `gpt-6-luna` | Dictation cleanup, a bit slower. |
 | `gpt-6-sol` | Meeting notes. Slower, but better at telling a proposal from a decision. |
 
+## Spoken Finnish
+
+OpenWhispr's default cleanup prompt says "Fix grammar, spelling, punctuation", and with it the cleanup model turned Finnish puhekieli into kirjakieli: "ei oo ... mut katotaan" became "ei ole ... mutta katsotaan". Both speech models kept the spoken forms in a test with Finnish `say` audio, so it's the cleanup step that changes them.
+
+[docs/cleanup-prompt.txt](docs/cleanup-prompt.txt) is the default prompt with that rule replaced. It fixes only punctuation and capitalization, and has a REGISTER rule: words stay in the form you said them, so puhekieli stays puhekieli and kirjakieli stays kirjakieli. It also counts "ei ku" and "tai siis" as self-corrections, and has a Finnish example of each register. Times are written 17.30. In testing with gpt-5.4-mini, nine Finnish sentences in both registers kept their register in three runs each. Self-corrections and English dictation still came out as before. Once, "tienny" became "tiennyt"; that was before `tienny` was added to the rule's examples.
+
+To use it, paste the file into Prompt Studio's cleanup prompt and save, or run:
+
+```sh
+./set-cleanup-prompt.sh            # or: ./set-cleanup-prompt.sh path/to/prompt.txt
+```
+
+The script quits OpenWhispr Patched, sets the prompt and starts the app again, so it works over SSH too. Leave OpenWhispr's language on auto. With Finnish selected, the app adds "maintaining proper Finnish grammar, spelling, and punctuation" after your prompt, and that can't be edited.
+
 ## Meetings and screenshots
 
 The official OpenWhispr app can't send Note Recording to a local server, so meetings need a patched build. The same build lets you paste screenshots into a note and have note actions send them to the model. [openwhispr-patch/README.md](openwhispr-patch/README.md) covers building it and setting it up.
