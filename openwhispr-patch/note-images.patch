@@ -1,5 +1,5 @@
 diff --git a/main.js b/main.js
-index f087be23a..7e7c1c1cd 100644
+index 6b78e84..1aec1ca 100644
 --- a/main.js
 +++ b/main.js
 @@ -29,6 +29,10 @@ const http = require("http");
@@ -13,7 +13,7 @@ index f087be23a..7e7c1c1cd 100644
  // Extend Node's TLS trust with the OS store so ws and https.get see corporate
  // CAs that Chromium already trusts.
  try {
-@@ -693,6 +697,7 @@ function initializeCoreManagers() {
+@@ -728,6 +732,7 @@ function initializeCoreManagers() {
      oauthProtocolRegistered: protocolRegistered,
      oauthProtocol: OAUTH_PROTOCOL,
    });
@@ -22,10 +22,10 @@ index f087be23a..7e7c1c1cd 100644
  
  function registerSidecars() {
 diff --git a/preload.js b/preload.js
-index b1e87c587..2b9461997 100644
+index 3f6ed13..19fac28 100644
 --- a/preload.js
 +++ b/preload.js
-@@ -241,6 +241,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
+@@ -268,6 +268,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
    undoNoteUpdate: (token) => ipcRenderer.invoke("db-undo-note-update", token),
    discardNoteUndo: (id, token) => ipcRenderer.invoke("db-discard-note-undo", id, token),
    deleteNote: (id) => ipcRenderer.invoke("db-delete-note", id),
@@ -36,35 +36,41 @@ index b1e87c587..2b9461997 100644
    exportTranscript: (noteId, format) => ipcRenderer.invoke("export-transcript", noteId, format),
    exportDictionary: (words) => ipcRenderer.invoke("export-dictionary", words),
 diff --git a/src/components/notes/PersonalNotesView.tsx b/src/components/notes/PersonalNotesView.tsx
-index 765caeb39..14d6193bb 100644
+index b4e6b0f..7267e67 100644
 --- a/src/components/notes/PersonalNotesView.tsx
 +++ b/src/components/notes/PersonalNotesView.tsx
-@@ -31,6 +31,11 @@ import {
-   collectKnownPeople,
-   type MeetingIdentity,
- } from "../../utils/llmTranscript";
+@@ -42,6 +42,11 @@ import {
+   resolveNoteRecorder,
+   recordingRecorderName,
+ } from "../../utils/noteRecorder";
 +import {
 +  buildLlmTranscriptWithScreenshots,
 +  collectNoteScreenshots,
 +  labelScreenshotsInMarkdown,
 +} from "../../utils/noteScreenshots";
+ import { fetchSpaceRoster } from "../../hooks/useSpaceRoster";
  import type { MentionPerson } from "../../utils/mentionMarkdown";
  import type { CalendarAttendee, CalendarEvent } from "../../types/calendar";
- import {
-@@ -755,6 +760,8 @@ export default function PersonalNotesView({
-     // note's text and left the transcript empty (#2666).
-     const transcriptInContent = !rawTranscript && editorNote.note_type === "upload";
-     const transcriptText = transcriptInContent ? noteContent : rawTranscript;
+@@ -790,6 +795,8 @@ export default function PersonalNotesView({
+     const segments = parseTranscriptSegments(rawTranscript);
+     const speakerlessText = speakerlessTranscriptText(segments);
+     const transcriptText = transcriptInContent ? noteContent : (speakerlessText ?? rawTranscript);
 +    // Local patch: pasted screenshots go to the model as images (utils/noteScreenshots.ts).
 +    const screenshots = collectNoteScreenshots(noteContent);
  
      let formattedTranscript = "";
      let meetingContext = "";
-@@ -777,7 +784,16 @@ export default function PersonalNotesView({
- 
-         const selfLabel = identity.selfName || t("notes.speaker.you");
+@@ -822,13 +829,17 @@ export default function PersonalNotesView({
+         const selfLabel = recorderLlmLabel(identity, recordedByUser, t);
+         const viewerLabel = user?.name?.trim() || user?.email?.trim() || t("notes.speaker.you");
          meetingContext = buildMeetingContext(identity, selfLabel);
--        formattedTranscript = buildLlmTranscript(segments, speakerMappings, selfLabel, t);
+-        formattedTranscript = buildLlmTranscript(
+-          segments,
+-          speakerMappings,
+-          selfLabel,
+-          t,
+-          viewerLabel
+-        );
 +        formattedTranscript =
 +          screenshots.length > 0
 +            ? buildLlmTranscriptWithScreenshots(
@@ -72,13 +78,14 @@ index 765caeb39..14d6193bb 100644
 +                speakerMappings,
 +                selfLabel,
 +                t,
-+                screenshots
++                screenshots,
++                viewerLabel
 +              )
-+            : buildLlmTranscript(segments, speakerMappings, selfLabel, t);
++            : buildLlmTranscript(segments, speakerMappings, selfLabel, t, viewerLabel);
          knownPeople = collectKnownPeople(identity, speakerMappings, segments);
        } else {
          // Plain text shows no speakers, so the run gets no Meeting Context: the model
-@@ -793,7 +809,7 @@ export default function PersonalNotesView({
+@@ -844,7 +855,7 @@ export default function PersonalNotesView({
  
      const { input, fromSummary, material } = buildNoteRunInput(action, {
        summary: editorEnhancedContent,
@@ -87,7 +94,7 @@ index 765caeb39..14d6193bb 100644
        meetingContext,
        transcript: formattedTranscript,
      });
-@@ -805,6 +821,7 @@ export default function PersonalNotesView({
+@@ -856,6 +867,7 @@ export default function PersonalNotesView({
        knownPeople,
        fromSummary,
        material,
@@ -96,7 +103,7 @@ index 765caeb39..14d6193bb 100644
          editorNote.title,
          [t("notes.list.untitledNote"), t("notes.list.newNote"), t("notes.sidebar.newNote")],
 diff --git a/src/components/ui/RichTextEditor.tsx b/src/components/ui/RichTextEditor.tsx
-index c40ca64a5..0956b772f 100644
+index c40ca64..0956b77 100644
 --- a/src/components/ui/RichTextEditor.tsx
 +++ b/src/components/ui/RichTextEditor.tsx
 @@ -5,6 +5,7 @@ import { createMentionExtension } from "./RichTextEditorMention";
@@ -117,7 +124,7 @@ index c40ca64a5..0956b772f 100644
      editable: !disabled,
 diff --git a/src/components/ui/noteImageExtension.ts b/src/components/ui/noteImageExtension.ts
 new file mode 100644
-index 000000000..330c33490
+index 0000000..330c334
 --- /dev/null
 +++ b/src/components/ui/noteImageExtension.ts
 @@ -0,0 +1,103 @@
@@ -226,7 +233,7 @@ index 000000000..330c33490
 +});
 diff --git a/src/helpers/noteMedia.js b/src/helpers/noteMedia.js
 new file mode 100644
-index 000000000..c7474ee44
+index 0000000..c7474ee
 --- /dev/null
 +++ b/src/helpers/noteMedia.js
 @@ -0,0 +1,178 @@
@@ -410,7 +417,7 @@ index 000000000..c7474ee44
 +module.exports = { registerScheme, start, MODEL_MAX_IMAGES };
 diff --git a/src/helpers/noteMediaLinks.js b/src/helpers/noteMediaLinks.js
 new file mode 100644
-index 000000000..ecc1d2ee4
+index 0000000..ecc1d2e
 --- /dev/null
 +++ b/src/helpers/noteMediaLinks.js
 @@ -0,0 +1,35 @@
@@ -450,7 +457,7 @@ index 000000000..ecc1d2ee4
 +  return names;
 +}
 diff --git a/src/index.css b/src/index.css
-index 3eaca4c1a..8b384aacb 100644
+index 3eaca4c..8b384aa 100644
 --- a/src/index.css
 +++ b/src/index.css
 @@ -1807,6 +1807,22 @@ a:hover {
@@ -476,8 +483,21 @@ index 3eaca4c1a..8b384aacb 100644
  /* Task list (checkboxes) */
  .rich-text-editor-content ul[data-type="taskList"] {
    list-style: none;
+diff --git a/src/index.html b/src/index.html
+index 01de620..411f202 100644
+--- a/src/index.html
++++ b/src/index.html
+@@ -10,7 +10,7 @@
+     -->
+     <meta
+       http-equiv="Content-Security-Policy"
+-      content="img-src 'self' data: https://www.gravatar.com https://lh3.googleusercontent.com https://lh4.googleusercontent.com https://lh5.googleusercontent.com https://lh6.googleusercontent.com"
++      content="img-src 'self' data: openwhispr-media: https://www.gravatar.com https://lh3.googleusercontent.com https://lh4.googleusercontent.com https://lh5.googleusercontent.com https://lh6.googleusercontent.com"
+     />
+     <link rel="icon" type="image/png" href="./assets/icon.png" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 diff --git a/src/services/BaseReasoningService.ts b/src/services/BaseReasoningService.ts
-index 8a6028518..a0bc7011d 100644
+index c49eb16..cf88c8a 100644
 --- a/src/services/BaseReasoningService.ts
 +++ b/src/services/BaseReasoningService.ts
 @@ -6,6 +6,13 @@ import type { InferenceScope } from "../config/inferenceScopes";
@@ -503,7 +523,7 @@ index 8a6028518..a0bc7011d 100644
    requireCompleteOutput?: boolean;
    /** Bundled local server only; callers must validate the decoded response. */
 diff --git a/src/services/ReasoningService.ts b/src/services/ReasoningService.ts
-index 3c5b3c20c..bcf3257da 100644
+index c74bc78..78aeb40 100644
 --- a/src/services/ReasoningService.ts
 +++ b/src/services/ReasoningService.ts
 @@ -44,6 +44,7 @@ import {
@@ -514,7 +534,7 @@ index 3c5b3c20c..bcf3257da 100644
  import { openCodeSessionHeaders } from "./ai/openCodeSession";
  import { createStreamingThinkFilter } from "./ai/streamingThinkFilter";
  import { extractApiErrorMessage } from "./ai/apiErrorMessage";
-@@ -308,7 +309,7 @@ class ReasoningService extends BaseReasoningService {
+@@ -311,7 +312,7 @@ class ReasoningService extends BaseReasoningService {
  
      const messages = [
        { role: "system", content: systemPrompt },
@@ -524,7 +544,7 @@ index 3c5b3c20c..bcf3257da 100644
  
      const requestBody: any = { model, messages };
 diff --git a/src/services/ai/inferenceProviders/openai.ts b/src/services/ai/inferenceProviders/openai.ts
-index a0ec25717..476b26cec 100644
+index a0ec257..476b26c 100644
 --- a/src/services/ai/inferenceProviders/openai.ts
 +++ b/src/services/ai/inferenceProviders/openai.ts
 @@ -29,6 +29,7 @@ import {
@@ -563,7 +583,7 @@ index a0ec25717..476b26cec 100644
        ? API_ENDPOINTS.OPENROUTER_BASE
 diff --git a/src/services/ai/noteImageContent.ts b/src/services/ai/noteImageContent.ts
 new file mode 100644
-index 000000000..526ecd642
+index 0000000..526ecd6
 --- /dev/null
 +++ b/src/services/ai/noteImageContent.ts
 @@ -0,0 +1,30 @@
@@ -598,7 +618,7 @@ index 000000000..526ecd642
 +  ];
 +}
 diff --git a/src/stores/actionProcessingStore.ts b/src/stores/actionProcessingStore.ts
-index 34ef59243..d9d0f08d5 100644
+index 9c64687..7bc845b 100644
 --- a/src/stores/actionProcessingStore.ts
 +++ b/src/stores/actionProcessingStore.ts
 @@ -1,5 +1,9 @@
@@ -612,7 +632,7 @@ index 34ef59243..d9d0f08d5 100644
  import { stripThinkingTags } from "../helpers/stripThinking";
  import { compileSummaryActionPrompt, compileTemplatePrompt } from "../helpers/templatePrompts";
  import reasoningService from "../services/ReasoningService";
-@@ -60,6 +64,11 @@ const MIN_CHUNK_BUDGET_TOKENS = 1024;
+@@ -61,6 +65,11 @@ const MIN_CHUNK_BUDGET_TOKENS = 1024;
  const MAX_PART_TOKENS = 12288;
  const MAX_REDUCE_ROUNDS = 3;
  const MAX_SPLIT_DEPTH = 3;
@@ -624,7 +644,7 @@ index 34ef59243..d9d0f08d5 100644
  
  export type ActionProcessingStatus = "idle" | "processing" | "success";
  
-@@ -502,6 +511,8 @@ export interface RunActionOptions {
+@@ -503,6 +512,8 @@ export interface RunActionOptions {
    material?: NoteMaterial;
    /** An action's input is the note's AI summary rather than its notes and transcript. */
    fromSummary?: boolean;
@@ -633,8 +653,8 @@ index 34ef59243..d9d0f08d5 100644
  }
  
  export interface RunActionLabels {
-@@ -568,6 +579,13 @@ export function runBackgroundAction(
-         options.isMeetingNote || options.hasPlainTranscript ? settings.customDictionary : undefined,
+@@ -571,6 +582,13 @@ export function runBackgroundAction(
+           : undefined,
          settings.uiLanguage
        );
 +      // Local patch: notes may show the screenshots inline; an email gets pasted
@@ -647,7 +667,7 @@ index 34ef59243..d9d0f08d5 100644
        const requestConfig: ReasoningConfig = {
          systemPrompt,
          // A rewrite repeats a summary written under NOTE_OUTPUT_MAX_TOKENS, plus its edit.
-@@ -588,8 +606,9 @@ export function runBackgroundAction(
+@@ -591,8 +609,9 @@ export function runBackgroundAction(
          ...(rewritesSummary && { requireCompleteOutput: true }),
          requestId: runId,
          ...providerOverrides,
@@ -658,7 +678,7 @@ index 34ef59243..d9d0f08d5 100644
          noteId,
          noteContent,
          modelId,
-@@ -608,6 +627,9 @@ export function runBackgroundAction(
+@@ -611,6 +630,9 @@ export function runBackgroundAction(
        if (isNothingToSummarizeReply(enhanced)) {
          throw nothingToSummarizeError();
        }
@@ -669,10 +689,10 @@ index 34ef59243..d9d0f08d5 100644
        if (isCancelled()) return;
  
 diff --git a/src/types/electron.ts b/src/types/electron.ts
-index 20eb50657..eff3a2442 100644
+index a107d6f..1a732db 100644
 --- a/src/types/electron.ts
 +++ b/src/types/electron.ts
-@@ -1746,6 +1746,13 @@ declare global {
+@@ -1869,6 +1869,13 @@ declare global {
        ) => Promise<{ success: boolean; note?: NoteItem; error?: string }>;
        discardNoteUndo: (id: number, token?: string) => Promise<void>;
        deleteNote: (id: number) => Promise<{ success: boolean }>;
@@ -688,10 +708,10 @@ index 20eb50657..eff3a2442 100644
          format: "txt" | "md"
 diff --git a/src/utils/noteScreenshots.ts b/src/utils/noteScreenshots.ts
 new file mode 100644
-index 000000000..6ce5423aa
+index 0000000..f50865b
 --- /dev/null
 +++ b/src/utils/noteScreenshots.ts
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,183 @@
 +// Local patch: screenshots pasted into a note, sent to note actions as images.
 +//
 +// In the text the model reads, each screenshot link becomes "[Screenshot N, pasted HH:MM]",
@@ -765,11 +785,12 @@ index 000000000..6ce5423aa
 +  speakerMappings: Record<string, string>,
 +  selfLabel: string,
 +  t: Translate,
-+  shots: NoteScreenshot[]
++  shots: NoteScreenshot[],
++  viewerLabel = selfLabel
 +): string {
 +  const lines = segments.map(
 +    (segment) =>
-+      `${resolveLlmSpeakerLabel(segment, speakerMappings, selfLabel, t)}: ${segment.text}`
++      `${resolveLlmSpeakerLabel(segment, speakerMappings, selfLabel, t, viewerLabel)}: ${segment.text}`
 +  );
 +  const times = segments
 +    .map((segment) => segment.timestamp)
@@ -876,7 +897,7 @@ index 000000000..6ce5423aa
 +}
 diff --git a/test/utils/noteScreenshots.test.js b/test/utils/noteScreenshots.test.js
 new file mode 100644
-index 000000000..c61b3142f
+index 0000000..c61b314
 --- /dev/null
 +++ b/test/utils/noteScreenshots.test.js
 @@ -0,0 +1,150 @@

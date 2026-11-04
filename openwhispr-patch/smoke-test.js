@@ -15,7 +15,7 @@ if (!dir || !pcmFile || !process.env.OPENWHISPR_OPENAI_REALTIME_URL) {
   process.exit(2);
 }
 
-// The client requires ./debugLogger, which needs Electron. Load a copy next to a stub.
+// The client requires ./debugLogger and ./i18nMain, which need Electron. Load a copy next to stubs.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openwhispr-smoke-"));
 fs.copyFileSync(path.join(dir, "src/helpers/openaiRealtimeStreaming.js"), path.join(tmp, "client.js"));
 fs.writeFileSync(
@@ -23,6 +23,7 @@ fs.writeFileSync(
   "const quiet = () => {};\n" +
     "module.exports = { debug: quiet, info: quiet, warn: quiet, error: (m, c) => console.error(m, c || '') };\n"
 );
+fs.writeFileSync(path.join(tmp, "i18nMain.js"), "module.exports = { i18nMain: { t: (key) => key } };\n");
 process.env.NODE_PATH = path.join(dir, "node_modules"); // resolve `ws` from the build
 Module._initPaths();
 const Client = require(path.join(tmp, "client.js"));

@@ -62,7 +62,7 @@ openwhispr-patch/build.sh                 # builds ../openwhispr at its newest v
 
 To build a specific release instead: `openwhispr-patch/build.sh ../openwhispr v1.10.4`.
 
-The patches were last updated for and tested on **OpenWhispr v1.10.4**: they apply, the app builds, the realtime smoke test passes, and `npm run typecheck` is clean. OpenWhispr's own `npm test` has 17 failures on v1.10.4 with or without the patches. A newer release may need the patches updated; `build.sh` stops and says which patch no longer applies.
+The patches were last updated for and tested on **OpenWhispr v1.11.0**: they apply, the app builds, the realtime smoke test passes, `npm run typecheck` is clean, and a saved screenshot loads in the installed app. OpenWhispr's own `npm test` wasn't run on v1.11.0. It had 17 failures on v1.10.4 with or without the patches. A newer release may need the patches updated; `build.sh` stops and says which patch no longer applies.
 
 Then quit OpenWhispr (only one of the two apps can run at a time) and install:
 
@@ -215,6 +215,7 @@ Without the certificate, `build.sh` still builds, but prints a warning and leave
 ## Build problems
 
 - **`npm ci` fails on the Node version.** OpenWhispr pins Node 24 in `.nvmrc` and sets `engine-strict`. `build.sh` switches to Homebrew's keg-only `node@24` if it's installed (`brew install node@24`), leaving your default `node` alone.
+- **`dyld: Library not loaded` from Homebrew's `node@24`.** A newer Homebrew dependency can leave the keg unable to start (seen with `libsimdjson`). `build.sh` only uses the keg when your default Node is a different major version, so put another Node 24 first on `PATH`, like one from mise: `PATH="$HOME/.local/share/mise/installs/node/24.22.1/bin:$PATH" openwhispr-patch/build.sh`.
 - **The build hangs after "Downloaded".** `download-whisper-vad-model.js` can hang there, because an open socket to Hugging Face's CDN keeps Node running. Kill that `node scripts/download-whisper-vad-model.js` process and re-run. The rerun skips finished downloads.
 - **Why `sign.js` skips identity validation.** `@electron/osx-sign` looks identities up under the default trust policy, where the self-signed certificate is reported as not trusted. `sign.js` passes `identityValidation: false` and lets `codesign` check it under the code-signing policy.
 
