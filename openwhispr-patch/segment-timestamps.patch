@@ -1,0 +1,136 @@
+diff --git a/src/helpers/openaiRealtimeStreaming.js b/src/helpers/openaiRealtimeStreaming.js
+index 8b129d6a3..5e57019d2 100644
+--- a/src/helpers/openaiRealtimeStreaming.js
++++ b/src/helpers/openaiRealtimeStreaming.js
+@@ -17,6 +17,8 @@ const SESSION_PREEMPT_MS = 55 * 60 * 1000;
+ // Raised from 0.3 to keep mic ambient noise from opening turns (#630); callers
+ // on a cleaner channel pass their own vadThreshold.
+ const DEFAULT_VAD_THRESHOLD = 0.6;
++// Local patch: segment timestamps. Turns awaiting a transcript are a handful at most.
++const MAX_TRACKED_SPEECH_STARTS = 64;
+ 
+ // Matches the server's check, which may pin a snapshot id.
+ const isLiveTranscribe = (model) => model.startsWith("gpt-live-transcribe");
+@@ -101,6 +103,7 @@ class OpenAIRealtimeStreaming {
+     this.coldStartBuffer = [];
+     this.coldStartBufferSize = 0;
+     this.speechStartedAt = null;
++    this.speechStartTimes = new Map();
+     this.bufferingAudio = false;
+     this.keepAliveInterval = null;
+     this._onTurnSettled = null;
+@@ -161,6 +164,7 @@ class OpenAIRealtimeStreaming {
+     this.currentPartial = "";
+     this.audioBytesSent = 0;
+     this.speechStartedAt = null;
++    this.speechStartTimes = new Map();
+     this.speechStartedCount = 0;
+     this._vadEventCount = 0;
+     this._sessionExpired = false;
+@@ -350,8 +354,7 @@ class OpenAIRealtimeStreaming {
+             this.completedSegments.push(transcript);
+           }
+           this.currentPartial = "";
+-          const speechTimestamp = this.speechStartedAt || Date.now();
+-          this.speechStartedAt = null;
++          const speechTimestamp = this._takeSpeechStart(event.item_id);
+           if (transcript) {
+             const fullText = this.getFullTranscript();
+             this.onFinalTranscript?.(fullText, speechTimestamp);
+@@ -390,6 +393,7 @@ class OpenAIRealtimeStreaming {
+                 : event.error?.message || event.error?.code || null,
+             })
+           );
++          this.speechStartTimes.delete(event.item_id);
+           this.pendingTranscriptions.delete(event.item_id);
+           this._onTurnSettled?.();
+           break;
+@@ -397,6 +401,7 @@ class OpenAIRealtimeStreaming {
+ 
+         case "input_audio_buffer.speech_started":
+           this.speechStartedAt = Date.now();
++          this._rememberSpeechStart(event.item_id, this.speechStartedAt);
+           this.speechStartedCount++;
+           this._logVadEvent(event.type);
+           break;
+@@ -481,6 +486,35 @@ class OpenAIRealtimeStreaming {
+ 
+   // Throttled to first-3-then-every-50th: a normal meeting produces hundreds of
+   // these, so ZERO over a whole meeting means server VAD never fired.
++  // Local patch: segment timestamps. A turn's transcript can arrive after the
++  // next turn's speech_started (the server transcribes while audio keeps
++  // flowing), so a single speechStartedAt gave the finished turn the next
++  // turn's start time and the next turn its arrival time. Meeting speaker
++  // labels match on these times. Both events carry item_id, so start times
++  // are kept per item; speechStartedAt stays the fallback for servers that
++  // send no item_id.
++  _rememberSpeechStart(itemId, at) {
++    if (!itemId) return;
++    this.speechStartTimes.set(itemId, at);
++    // Noise blips start an item that never completes; keep the map bounded.
++    if (this.speechStartTimes.size > MAX_TRACKED_SPEECH_STARTS) {
++      this.speechStartTimes.delete(this.speechStartTimes.keys().next().value);
++    }
++  }
++
++  _takeSpeechStart(itemId) {
++    const keyed = itemId ? this.speechStartTimes.get(itemId) : undefined;
++    if (keyed != null) {
++      this.speechStartTimes.delete(itemId);
++      // Clear the fallback only if it belongs to this turn, not a newer one.
++      if (this.speechStartedAt === keyed) this.speechStartedAt = null;
++      return keyed;
++    }
++    const fallback = this.speechStartedAt || Date.now();
++    this.speechStartedAt = null;
++    return fallback;
++  }
++
+   _logVadEvent(type) {
+     this._vadEventCount++;
+     if (this._vadEventCount <= 3 || this._vadEventCount % 50 === 0) {
+diff --git a/test/helpers/openaiRealtimeStreaming.test.js b/test/helpers/openaiRealtimeStreaming.test.js
+index 1b7c04e61..6e552f0da 100644
+--- a/test/helpers/openaiRealtimeStreaming.test.js
++++ b/test/helpers/openaiRealtimeStreaming.test.js
+@@ -1072,6 +1072,40 @@ const completedEvent = (transcript) =>
+     transcript,
+   });
+ 
++// Local patch: segment timestamps.
++test("a final that arrives after the next turn started keeps its own turn's start time", async (t) => {
++  const OpenAIRealtimeStreaming = (await load()).default;
++  const streaming = new OpenAIRealtimeStreaming();
++  const socket = makeFakeSocket(WS.CONNECTING);
++  await connectByok(streaming, socket);
++  const finals = [];
++  streaming.onFinalTranscript = (text, timestamp) => finals.push({ text, timestamp });
++  t.mock.timers.enable({ apis: ["Date"], now: 1_000 });
++  const emit = (event) => socket.emit("message", JSON.stringify(event));
++  const completed = (item_id, transcript) =>
++    emit({ type: "conversation.item.input_audio_transcription.completed", item_id, transcript });
++
++  emit({ type: "input_audio_buffer.speech_started", item_id: "item_a" });
++  t.mock.timers.tick(6_000);
++  emit({ type: "input_audio_buffer.committed", item_id: "item_a" });
++  t.mock.timers.tick(1_000);
++  // The next speaker starts before item_a's transcript comes back.
++  emit({ type: "input_audio_buffer.speech_started", item_id: "item_b" });
++  t.mock.timers.tick(500);
++  completed("item_a", "First speaker.");
++  t.mock.timers.tick(4_000);
++  emit({ type: "input_audio_buffer.committed", item_id: "item_b" });
++  t.mock.timers.tick(1_500);
++  completed("item_b", "Second speaker.");
++
++  assert.deepEqual(
++    finals.map((f) => f.timestamp),
++    [1_000, 8_000]
++  );
++  assert.equal(streaming.speechStartTimes.size, 0);
++  streaming.cleanup();
++});
++
+ test("gpt-live-transcribe session.update sends turn_detection: null (any VAD config is rejected); the rest is the legacy payload", async () => {
+   const OpenAIRealtimeStreaming = (await load()).default;
+   const streaming = new OpenAIRealtimeStreaming();

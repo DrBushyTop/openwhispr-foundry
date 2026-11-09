@@ -1,0 +1,276 @@
+diff --git a/src/components/MeetingRecordingMount.tsx b/src/components/MeetingRecordingMount.tsx
+index 0076c2b2b..b6555da80 100644
+--- a/src/components/MeetingRecordingMount.tsx
++++ b/src/components/MeetingRecordingMount.tsx
+@@ -15,9 +15,16 @@ import logger from "../utils/logger";
+ import { usePolicySnapshot } from "../hooks/usePolicy";
+ import { isAudioFeatureAllowed } from "../stores/policyRules";
+ import { requestSignIn } from "../utils/requestSignIn";
++import { isWindowIdle } from "../utils/windowActivity";
+ 
+ const EMA_PREV = 0.5;
+ const EMA_NEXT = 0.5;
++// Local patch: idle animations. The level only drives the recording pill's
++// four bars, so 10 updates a second is plenty. Sampling on every display
++// frame re-rendered the pill 120 times a second for the whole meeting.
++const MIC_LEVEL_SAMPLE_MS = 100;
++// Changes smaller than this don't move a bar by a visible amount.
++const MIC_LEVEL_MIN_CHANGE = 0.005;
+ 
+ // Sentinel errors set by meetingRecordingStore, translated at display time.
+ // A sentinel may carry one argument after a colon, e.g. `unsupportedProvider:groq`.
+@@ -216,12 +223,13 @@ export default function MeetingRecordingMount(): null {
+   useEffect(() => {
+     if (!isRecording) return;
+ 
+-    let rafId = 0;
+     let smoothed = 0;
++    let published = 0;
+     let buf = new Float32Array(256);
+ 
+     const tick = () => {
+-      const analyser = getMicAnalyser();
++      // Nobody sees the pill while the window is idle.
++      const analyser = isWindowIdle() ? null : getMicAnalyser();
+       if (analyser) {
+         if (buf.length !== analyser.fftSize) {
+           buf = new Float32Array(analyser.fftSize);
+@@ -235,15 +243,17 @@ export default function MeetingRecordingMount(): null {
+         const rms = Math.sqrt(sumSquares / buf.length);
+         smoothed = EMA_PREV * smoothed + EMA_NEXT * rms;
+         const clamped = smoothed < 0 ? 0 : smoothed > 1 ? 1 : smoothed;
+-        useMeetingRecordingStore.setState({ currentMicLevel: clamped });
++        if (Math.abs(clamped - published) >= MIC_LEVEL_MIN_CHANGE) {
++          published = clamped;
++          useMeetingRecordingStore.setState({ currentMicLevel: clamped });
++        }
+       }
+-      rafId = requestAnimationFrame(tick);
+     };
+ 
+-    rafId = requestAnimationFrame(tick);
++    const id = setInterval(tick, MIC_LEVEL_SAMPLE_MS);
+ 
+     return () => {
+-      cancelAnimationFrame(rafId);
++      clearInterval(id);
+       useMeetingRecordingStore.setState({ currentMicLevel: 0 });
+     };
+   }, [isRecording]);
+diff --git a/src/components/notes/NoteRecordControl.tsx b/src/components/notes/NoteRecordControl.tsx
+index d113280da..38cd08fb0 100644
+--- a/src/components/notes/NoteRecordControl.tsx
++++ b/src/components/notes/NoteRecordControl.tsx
+@@ -22,16 +22,17 @@ const RECORDING_SURFACE = "bg-surface-2/95 shadow-(--shadow-glass)";
+ 
+ const WAVE_BAR_HEIGHTS = [6, 12, 9, 11];
+ 
+-/** Four-bar pulse shown in the Transcript tab while a recording is running. */
++/**
++ * Four bars shown in the Transcript tab while a recording is running.
++ * Local patch: idle animations. Static: a looping pulse kept WindowServer
++ * compositing the window at full refresh rate for the whole meeting, and the
++ * record button's live waveform already shows that audio is coming in.
++ */
+ export function RecordingWave({ className }: { className?: string }) {
+   return (
+     <span aria-hidden="true" className={cn("flex h-3 items-center gap-px", className)}>
+       {WAVE_BAR_HEIGHTS.map((height, i) => (
+-        <span
+-          key={i}
+-          className="w-0.5 rounded-full bg-primary animate-[ow-wave_1s_ease-in-out_infinite] motion-reduce:animate-none"
+-          style={{ height, animationDelay: `${i * 0.15}s` }}
+-        />
++        <span key={i} className="w-0.5 rounded-full bg-primary" style={{ height }} />
+       ))}
+     </span>
+   );
+diff --git a/src/components/ui/LiveWaveform.tsx b/src/components/ui/LiveWaveform.tsx
+index e518175ec..880066e27 100644
+--- a/src/components/ui/LiveWaveform.tsx
++++ b/src/components/ui/LiveWaveform.tsx
+@@ -7,6 +7,7 @@ import {
+   waveBarColor,
+   waveBarVisual,
+ } from "./liveWaveformMath";
++import { isWindowIdle } from "../../utils/windowActivity";
+ 
+ const DEFAULT_BAR_COUNT = 40;
+ const WAVE_SAMPLE_MS = 150;
+@@ -17,9 +18,11 @@ const WAVE_MIN_AUTO_BARS = 16;
+ const WAVE_PEAK_FLOOR = 0.01;
+ const WAVE_PEAK_DECAY = 0.99;
+ 
+-// The cross-faded quiet/active pair behind every bar (see liveWaveformMath.ts).
+-const WAVE_LAYER_CLASS =
+-  "absolute inset-0 rounded-full transition-opacity duration-150 ease-out motion-reduce:transition-none";
++// The quiet/active pair behind every bar (see liveWaveformMath.ts).
++// Local patch: idle animations. No transitions: a 150ms transition per 150ms
++// sample kept the bars animating on every display frame, so the window never
++// stopped compositing. Without them the bars repaint 7 times a second.
++const WAVE_LAYER_CLASS = "absolute inset-0 rounded-full";
+ 
+ interface LiveWaveformProps {
+   /** Returns the current level (RMS, 0..1-ish); sampled every 150ms. */
+@@ -64,6 +67,8 @@ export function LiveWaveform({
+   // recording never pays React render, layout, or paint cost for the wave.
+   useEffect(() => {
+     const id = setInterval(() => {
++      // Frozen while nobody is looking at the window.
++      if (isWindowIdle()) return;
+       const level = readLevel();
+       peakRef.current = Math.max(level, peakRef.current * WAVE_PEAK_DECAY, WAVE_PEAK_FLOOR);
+       const norm = Math.min(1, level / peakRef.current);
+@@ -96,7 +101,7 @@ export function LiveWaveform({
+           ref={(el) => {
+             barRefs.current[i] = el;
+           }}
+-          className="relative w-0.5 shrink-0 transition-transform duration-150 ease-out motion-reduce:transition-none"
++          className="relative w-0.5 shrink-0"
+           style={{
+             height: WAVE_MAX_PX,
+             transform: `scaleY(${WAVE_REST_VISUAL.scaleY})`,
+diff --git a/src/index.css b/src/index.css
+index 8b384aacb..2db2d5c70 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -1556,17 +1556,6 @@ a:hover {
+   display: none;
+ }
+ 
+-/* Transcript tab indicator while a meeting is being recorded. */
+-@keyframes ow-wave {
+-  0%,
+-  100% {
+-    transform: scaleY(0.4);
+-  }
+-  50% {
+-    transform: scaleY(1);
+-  }
+-}
+-
+ ::-webkit-scrollbar-track {
+   background: transparent;
+ }
+diff --git a/src/main.jsx b/src/main.jsx
+index c9b5ca752..dabf340ba 100644
+--- a/src/main.jsx
++++ b/src/main.jsx
+@@ -10,6 +10,7 @@ import { I18nDirectionProvider } from "./components/I18nDirectionProvider.tsx";
+ import { ToastProvider } from "./components/ui/Toast.tsx";
+ import { SettingsProvider } from "./hooks/useSettings";
+ import { bindDocumentLanguage } from "./utils/i18nDocument";
++import { pauseLoopingAnimationsWhileIdle } from "./utils/windowActivity";
+ 
+ import i18n from "./i18n";
+ // Self-hosted so it works offline and makes no network call — the "opsz" build
+@@ -22,6 +23,7 @@ import "./brandFonts";
+ import "./index.css";
+ 
+ bindDocumentLanguage(i18n, document.documentElement, import.meta.hot);
++pauseLoopingAnimationsWhileIdle();
+ 
+ const root = ReactDOM.createRoot(document.getElementById("root"));
+ root.render(
+diff --git a/src/utils/windowActivity.ts b/src/utils/windowActivity.ts
+new file mode 100644
+index 000000000..f748bd238
+--- /dev/null
++++ b/src/utils/windowActivity.ts
+@@ -0,0 +1,65 @@
++import { isControlPanelWindow } from "./windowContext";
++
++// Local patch: idle animations.
++//
++// On macOS WindowServer composites every frame a window draws, so a looping
++// animation costs GPU for as long as it's on screen, even in a window nobody
++// is looking at. The control panel disables background throttling, so
++// Chromium keeps drawing it at the display's full refresh rate (120 Hz on
++// ProMotion) while it sits next to a meeting app.
++//
++// The control panel counts as idle while it doesn't have focus. The dictation
++// panel and its assistant overlay never take focus, so for them only a hidden
++// document counts as idle.
++
++export function isWindowIdle(): boolean {
++  if (typeof document === "undefined") return false;
++  if (document.visibilityState !== "visible") return true;
++  // A window with focus, or one that can't tell, counts as watched.
++  if (document.hasFocus?.() !== false) return false;
++  return isControlPanelWindow();
++}
++
++const isLooping = (animation: Animation): boolean =>
++  animation.effect?.getTiming().iterations === Infinity;
++
++/**
++ * Pauses looping CSS and Web animations (spinners, pulses, shimmers) while
++ * the window is idle and resumes them when it isn't. Finite animations keep
++ * running, so content that fades in while idle still appears. Call once per
++ * window.
++ */
++export function pauseLoopingAnimationsWhileIdle(): void {
++  const paused = new Set<Animation>();
++
++  const pauseRunning = () => {
++    for (const animation of document.getAnimations()) {
++      if (animation.playState === "running" && isLooping(animation)) {
++        animation.pause();
++        paused.add(animation);
++      }
++    }
++  };
++
++  const update = () => {
++    if (isWindowIdle()) {
++      pauseRunning();
++      return;
++    }
++    for (const animation of paused) {
++      // A paused animation whose element left the DOM is already idle.
++      if (animation.playState === "paused") animation.play();
++    }
++    paused.clear();
++  };
++
++  window.addEventListener("focus", update);
++  window.addEventListener("blur", update);
++  document.addEventListener("visibilitychange", update);
++  // Catches loops that start while idle, such as a spinner a background
++  // task shows, without polling.
++  document.addEventListener("animationstart", () => {
++    if (isWindowIdle()) pauseRunning();
++  });
++  update();
++}
+diff --git a/test/components/liveWaveform.test.js b/test/components/liveWaveform.test.js
+index 1735adc1d..f2877b49c 100644
+--- a/test/components/liveWaveform.test.js
++++ b/test/components/liveWaveform.test.js
+@@ -51,8 +51,10 @@ test("bars render with static colors and compositor-only animated properties", a
+ 
+   // The regression being fixed: bars must not transition height or
+   // background-color (both retrigger layout/paint on every 150ms sample).
+-  assert.ok(html.includes("transition-transform"));
+-  assert.ok(html.includes("transition-opacity"));
++  // Local patch: idle animations. No transitions at all: back-to-back 150ms
++  // transitions kept the window compositing on every display frame.
++  assert.ok(!html.includes("transition-transform"));
++  assert.ok(!html.includes("transition-opacity"));
+   assert.ok(!html.includes("transition-[height"));
+   assert.ok(!html.includes("background-color]"));
+ });
+diff --git a/test/lib/rendererTestHarness.js b/test/lib/rendererTestHarness.js
+index 6182ec75e..1aff7b94b 100644
+--- a/test/lib/rendererTestHarness.js
++++ b/test/lib/rendererTestHarness.js
+@@ -306,6 +306,9 @@ function installMicCaptureGlobals(t) {
+     gain: { value: 0 },
+     fftSize: 0,
+     smoothingTimeConstant: 0,
++    // Local patch: idle animations. The meeting mic-level sampler runs on
++    // setInterval, which tests mock, so it now reads the analyser.
++    getFloatTimeDomainData() {},
+   });
+   class FakeAudioContext {
+     constructor() {

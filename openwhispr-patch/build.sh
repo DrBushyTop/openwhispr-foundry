@@ -5,6 +5,9 @@
 #   realtime-url.patch  meeting transcription through the shim
 #   note-images.patch   screenshots pasted into notes, sent to note actions
 #   mobile-dictation.patch  dictation from a phone through OpenWhispr's settings
+#   idle-animations.patch   no looping animations while nobody is looking
+#   segment-timestamps.patch  each meeting segment keeps its own start time
+#   copy-note-images.patch    copied notes carry their screenshots to other apps
 #
 #   openwhispr-patch/build.sh [openwhispr-clone] [git-ref]
 #
@@ -53,7 +56,7 @@ if [ -d "$WORK" ]; then
 else
   git -C "$SRC" worktree add --detach "$WORK" "$REF"
 fi
-for PATCH in realtime-url note-images mobile-dictation; do
+for PATCH in realtime-url note-images mobile-dictation idle-animations segment-timestamps copy-note-images; do
   git -C "$WORK" apply "$HERE/$PATCH.patch" \
     || { echo "$PATCH.patch no longer applies to $REF: update it against that release." >&2; exit 1; }
 done

@@ -40,7 +40,7 @@ OpenWhispr's Note Recording can't use a self-hosted URL. The settings card says 
 
 `realtime-url.patch` changes that one line to read `OPENWHISPR_OPENAI_REALTIME_URL` first. The shim's `install-launchagent.sh` sets that variable at login to `ws://localhost:9447/v1/realtime?intent=transcription`. The official app ignores the variable.
 
-`note-images.patch` adds the screenshot support, described [below](#screenshots-in-notes). `mobile-dictation.patch` adds the endpoint for the phone app, described under [phone dictation](#phone-dictation).
+`note-images.patch` adds the screenshot support, described [below](#screenshots-in-notes). `mobile-dictation.patch` adds the endpoint for the phone app, described under [phone dictation](#phone-dictation). `idle-animations.patch` stops the window from using GPU during long recordings, described under [idle animations](#idle-animations). `segment-timestamps.patch` fixes the start times that meeting speaker labels are matched on, described under [segment timestamps](#segment-timestamps).
 
 ## Before you build
 
@@ -62,7 +62,7 @@ openwhispr-patch/build.sh                 # builds ../openwhispr at its newest v
 
 To build a specific release instead: `openwhispr-patch/build.sh ../openwhispr v1.10.4`.
 
-The patches were last updated for and tested on **OpenWhispr v1.11.0**: they apply, the app builds, the realtime smoke test passes, `npm run typecheck` is clean, and a saved screenshot loads in the installed app. OpenWhispr's own `npm test` wasn't run on v1.11.0. It had 17 failures on v1.10.4 with or without the patches. A newer release may need the patches updated; `build.sh` stops and says which patch no longer applies.
+The patches were last updated for and tested on **OpenWhispr v1.11.0**: they apply, the app builds, the realtime smoke test passes, `npm run typecheck` is clean, and a saved screenshot loads in the installed app. OpenWhispr's own `npm test` has 17 failures on v1.11.0, the same ones with or without `idle-animations.patch` and `segment-timestamps.patch` (it had 17 on v1.10.4 too). `copy-note-images.patch` was checked with `npm run typecheck` only. A newer release may need the patches updated; `build.sh` stops and says which patch no longer applies.
 
 Then quit OpenWhispr (only one of the two apps can run at a time) and install:
 
@@ -90,6 +90,12 @@ Settings → AI Models → Speech-to-Text → Note Recording → Cloud Providers
 
 Start a note recording and check the shim log for `rt` lines. If there are none, the app probably started before `install-launchagent.sh` set `OPENWHISPR_OPENAI_REALTIME_URL`. Apps opened from the Dock or Finder only see it if they start after it's set, so quit and reopen the app. [docs/how-it-works.md](../docs/how-it-works.md#meetings-realtime-transcription) explains how the shim cuts the audio into segments.
 
+### Segment timestamps
+
+OpenWhispr labels who said each segment of system audio by its start time. The live speaker identifier and the diarization after the meeting both match their speaker turns against it. The app's realtime client kept only the latest `speech_started` time, but the shim transcribes a segment while the next one is already being spoken. When the next speaker started before the previous transcript came back, the finished segment got the next segment's start time, and the next segment got the time its transcript arrived. Speaker labels then landed one segment off, mostly at the moments the speaker changed. In one meeting about half the gaps between segments were short enough for this.
+
+`segment-timestamps.patch` keeps each segment's start time by the `item_id` that both `speech_started` and the transcript carry. A server that sends no `item_id` gets the old behaviour. It doesn't change how speakers are told apart, only which segment their turns land on.
+
 ## Screenshots in notes
 
 This is for meetings where someone presents slides. Take a screenshot with Ctrl+Cmd+Shift+4, click in the note's Notes tab, and press Cmd+V. Dragging the screenshot thumbnail in works too. The Notes tab stays editable while recording.
@@ -100,7 +106,7 @@ Things to know:
 
 - Images reach the model through Self-Hosted (how this setup is configured) and the OpenAI-compatible providers (OpenAI, custom, OpenRouter, Groq). Anthropic, Gemini and OpenWhispr Cloud send the notes without the images.
 - Up to 40 screenshots per action.
-- Screenshots only show inside the app. Markdown mirror files and `.md` exports have just the link.
+- Copying a selection with screenshots in it, from your notes, the AI summary or the transcript, puts the images themselves on the clipboard, not links only the app can open, so other apps can paste them. `copy-note-images.patch` does this. Markdown mirror files and `.md` exports still have just the link.
 - The official app has no image support. Editing a note there drops its screenshot links.
 
 Tested in the installed app on a meeting note with a Finnish transcript and a pasted 2560×1440 slide. Detailed Notes with gpt-6-sol took 4.5s (3,694 tokens in). It took the slide's dates and prices exactly and matched "Liisa" in the transcript to "Liisa Korhonen" on the slide. It also placed the screenshot under the section it supports. Follow-up email used the same figures and included no image.
@@ -170,6 +176,21 @@ Dictations run one at a time. The main process (`src/helpers/mobileDictation.js`
 
 Tested from M4 over Tailscale to the build on M1: a 5-second clip came back cleaned up in 3.3 seconds (1.7 s speech-to-text with LLM Speech, 1.5 s cleanup with gpt-5.4-mini).
 
+## Idle animations
+
+During a meeting recording, the official app keeps WindowServer busy for as long as its window is on screen. Two indicators animate on every display frame, which is 120 times a second on a ProMotion display: the bars on the Transcript tab, and the waveform in the record button. WindowServer composites every frame again, behind the meeting app too, because the main window turns off Chromium's background throttling and is transparent on macOS. A third loop read the mic level on every frame and re-rendered the recording pill.
+
+`idle-animations.patch` changes this:
+
+- **Looping animations pause while nobody is looking.** The main window counts as idle while it doesn't have focus, and every window counts as idle while hidden. Spinners, pulses and shimmers pause then and resume on focus. Finite animations keep running, so a toast that fades in while you're in Teams still shows up. The dictation panel never takes focus, so there only a hidden panel counts. This lives in `src/utils/windowActivity.ts` and runs once per window from `src/main.jsx`.
+- **The Transcript tab icon is static** while recording. The record button already shows that audio is coming in.
+- **The record button's waveform repaints 7 times a second**, when it takes a new sample. Its bars jump to each new level instead of animating there, and it freezes while the window is idle.
+- **The mic level for the recording pill** is read 10 times a second instead of every frame, not at all while idle, and only stored when it changes visibly.
+
+While the window is in the background, the elapsed time on the record button still updates once a second. The rest of the recording UI is frozen until you click the window.
+
+For other apps that do this, macOS has two settings. **Reduce motion** (System Settings → Accessibility → Display) stops looping CSS animations in apps that respect it. In the official OpenWhispr it stops the Transcript tab bars, but the waveform's opacity fades keep running. Setting the display to 60 Hz (System Settings → Displays → Refresh rate) halves the cost of whatever still animates.
+
 ## Updating
 
 The patched app has no update feed, so nothing tells you about new releases. Check with `gh release list --repo OpenWhispr/openwhispr --limit 3`, or watch the repo's releases on GitHub. To update:
@@ -206,7 +227,7 @@ Without the certificate, `build.sh` still builds, but prints a warning and leave
 ## What build.sh does
 
 1. Checks out the release in a separate git worktree (`../openwhispr-build`), so your clone stays clean.
-2. Applies `realtime-url.patch`, `note-images.patch` and `mobile-dictation.patch`.
+2. Applies `realtime-url.patch`, `note-images.patch`, `mobile-dictation.patch`, `idle-animations.patch`, `segment-timestamps.patch` and `copy-note-images.patch`.
 3. Runs `npm ci`, then the realtime smoke test (`smoke-test.js`) against the running shim.
 4. Runs OpenWhispr's own prepack steps, which compile the native helpers and download the bundled binaries.
 5. Runs `electron-builder --mac --dir` with the new name and bundle ID, and removes the update feed.
@@ -230,4 +251,7 @@ Without the certificate, `build.sh` still builds, but prints a warning and leave
 | `realtime-url.patch` | reads `OPENWHISPR_OPENAI_REALTIME_URL` for meetings |
 | `note-images.patch` | screenshots in notes |
 | `mobile-dictation.patch` | the endpoint for phone dictation |
+| `idle-animations.patch` | no looping animations while nobody is looking at the window |
+| `segment-timestamps.patch` | each meeting segment keeps its own start time |
+| `copy-note-images.patch` | copied notes carry their screenshots to other apps |
 | `enable-mobile-dictation.sh` | turns on phone dictation and publishes it with Tailscale Serve |

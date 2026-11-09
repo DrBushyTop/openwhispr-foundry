@@ -1,0 +1,147 @@
+diff --git a/preload.js b/preload.js
+index d621c6b0b..f6e0dca8a 100644
+--- a/preload.js
++++ b/preload.js
+@@ -277,6 +277,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
+   // Local patch: screenshots pasted into notes (src/helpers/noteMedia.js).
+   saveNoteImage: (bytes, mimeType) => ipcRenderer.invoke("note-media-save", bytes, mimeType),
+   loadNoteImagesForModel: (names) => ipcRenderer.invoke("note-media-load-for-model", names),
++  copyNoteWithImages: (html, text) => ipcRenderer.invoke("note-media-copy", html, text),
+   exportNote: (noteId, format) => ipcRenderer.invoke("export-note", noteId, format),
+   exportTranscript: (noteId, format) => ipcRenderer.invoke("export-transcript", noteId, format),
+   exportDictionary: (words) => ipcRenderer.invoke("export-dictionary", words),
+diff --git a/src/components/ui/noteImageExtension.ts b/src/components/ui/noteImageExtension.ts
+index 330c33490..c35126b18 100644
+--- a/src/components/ui/noteImageExtension.ts
++++ b/src/components/ui/noteImageExtension.ts
+@@ -38,6 +38,24 @@ async function insertImages(view: EditorView, files: File[], at: number | null)
+   }
+ }
+ 
++// A copy with screenshots in it: ProseMirror fills the clipboard as usual, with
++// openwhispr-media:// links other apps can't load, and the main process then
++// rewrites it with the images embedded (noteMedia.js). A paste within a moment
++// of copying can still get the first version.
++function copyWithImages(view: EditorView) {
++  const copyNoteWithImages = window.electronAPI?.copyNoteWithImages;
++  if (!copyNoteWithImages || view.state.selection.empty) return;
++  const slice = view.state.selection.content();
++  let hasImage = false;
++  slice.content.descendants((node) => {
++    if (node.type.name === "image") hasImage = true;
++    return !hasImage;
++  });
++  if (!hasImage) return;
++  const { dom, text } = view.serializeForClipboard(slice);
++  void copyNoteWithImages(dom.innerHTML, text);
++}
++
+ export const NoteImage = Node.create({
+   name: "image",
+   // Before Link's paste handler, so an image paste never reaches it.
+@@ -76,6 +94,18 @@ export const NoteImage = Node.create({
+       new Plugin({
+         key: new PluginKey("noteImagePaste"),
+         props: {
++          // Runs before ProseMirror's own copy and cut, while the selection is
++          // still there, and lets them proceed.
++          handleDOMEvents: {
++            copy(view) {
++              copyWithImages(view);
++              return false;
++            },
++            cut(view) {
++              copyWithImages(view);
++              return false;
++            },
++          },
+           handlePaste(view, event) {
+             const data = event.clipboardData;
+             const files = imageFiles(data?.files);
+diff --git a/src/helpers/noteMedia.js b/src/helpers/noteMedia.js
+index c7474ee44..dcbba8c58 100644
+--- a/src/helpers/noteMedia.js
++++ b/src/helpers/noteMedia.js
+@@ -4,7 +4,7 @@
+ const fs = require("fs");
+ const path = require("path");
+ const crypto = require("crypto");
+-const { app, ipcMain, nativeImage, protocol } = require("electron");
++const { app, clipboard, ipcMain, nativeImage, protocol, screen } = require("electron");
+ const {
+   NOTE_MEDIA_SCHEME,
+   NOTE_MEDIA_NAME_RE,
+@@ -143,6 +143,41 @@ function sweepOrphans(databaseManager) {
+ }
+ 
+ // After app ready: serve the files, register IPC, and clean up in the background.
++// Local patch: copying notes with screenshots. Other apps can't load
++// openwhispr-media:// links, so OneNote, Word or Mail dropped the images from
++// a copied note. The copy goes out with each screenshot embedded as a data:
++// URL instead, sized in screen points so a Retina capture pastes at the size
++// it had on screen.
++const NOTE_MEDIA_SRC_RE = /src="openwhispr-media:\/\/image\/([^"]+)"/g;
++
++async function embeddedImage(name, scaleFactor) {
++  const file = mediaPath(name);
++  if (!file) return null;
++  const data = await fs.promises.readFile(file);
++  const { width } = nativeImage.createFromBuffer(data).getSize();
++  return {
++    src: `data:${mimeFor(name)};base64,${data.toString("base64")}`,
++    width: width ? Math.round(width / scaleFactor) : null,
++  };
++}
++
++async function embedImages(html) {
++  const scaleFactor = screen.getPrimaryDisplay().scaleFactor || 1;
++  const images = new Map();
++  for (const name of findNoteMediaNames(html)) {
++    try {
++      images.set(name, await embeddedImage(name, scaleFactor));
++    } catch (error) {
++      log().warn("Embedding copied screenshot failed", { name, error: error.message }, "noteMedia");
++    }
++  }
++  return html.replace(NOTE_MEDIA_SRC_RE, (match, name) => {
++    const image = images.get(name);
++    if (!image) return match;
++    return image.width ? `src="${image.src}" width="${image.width}"` : `src="${image.src}"`;
++  });
++}
++
+ function start(databaseManager) {
+   protocol.handle(NOTE_MEDIA_SCHEME, serve);
+ 
+@@ -166,6 +201,16 @@ function start(databaseManager) {
+     })
+   );
+ 
++  ipcMain.handle("note-media-copy", async (_event, html, text) => {
++    try {
++      clipboard.write({ html: await embedImages(String(html)), text: String(text) });
++      return { success: true };
++    } catch (error) {
++      log().warn("Copying note with screenshots failed", { error: error.message }, "noteMedia");
++      return { success: false, error: error.message };
++    }
++  });
++
+   setTimeout(() => {
+     try {
+       sweepOrphans(databaseManager);
+diff --git a/src/types/electron.ts b/src/types/electron.ts
+index 4956eef6d..fdcc24d17 100644
+--- a/src/types/electron.ts
++++ b/src/types/electron.ts
+@@ -1885,6 +1885,10 @@ declare global {
+       loadNoteImagesForModel?: (
+         names: string[]
+       ) => Promise<Array<{ name: string; mediaType: string; data: string } | null>>;
++      copyNoteWithImages?: (
++        html: string,
++        text: string
++      ) => Promise<{ success: boolean; error?: string }>;
+       exportNote: (
+         noteId: number,
+         format: "txt" | "md"
